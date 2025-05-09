@@ -17,12 +17,20 @@
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
-#define BOOST_ERROR_CODE_HEADER_ONLY
 #include "mxcamenc_pipe.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#define BOOST_ERROR_CODE_HEADER_ONLY
 #include <boost/asio.hpp>
+#include <boost/bind/bind.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/thread/thread.hpp>
+
+
+using boost::asio::ip::tcp;
+
+typedef boost::shared_ptr<tcp::socket> socket_ptr;
 
 static inline int _parse_query(const char *query,
                                char *query_name,
@@ -120,15 +128,23 @@ static void *video_io_threadfunc(void *arg)
     char buf[MAX_CMD_SIZE] = {0};
     ALOGD("MXCamEnc: video_io_threadfunc %d\n", mx->phone);
 
-    while (!mx->is_stop)
-    {
-        int client = accept(mx->video_server_socket, NULL, NULL);
-        if (client < 0)
-        {
-            break;
-        }
-    }
+    // while (!mx->is_stop)
+    // {
+    //     int client = accept(mx->video_server_socket, NULL, NULL);
+    //     if (client < 0)
+    //     {
+    //         break;
+    //     }
+    // }
     ALOGD("MXCamEnc: video_io_threadfunc exit\n");
+    boost::asio::io_context io_context;
+    
+    // listen and accept
+    boost::asio::ip::tcp::acceptor acceptor(io_context, tcp::endpoint(tcp::v4(), mx->video_port));
+    socket_ptr sock(new tcp::socket(io_context));
+    acceptor.accept(*sock);
+    ALOGD("MXCamEnc: video_io_threadfunc accept %d\n", mx->phone);
+    int ret = 0;
 
     return 0;
 }
@@ -137,32 +153,32 @@ int mxcam_start_server_socket(MxContext *mx){
     
     ALOGD("MXCamEnc: mxcam_start_server_socket=%d", mx->phone);
     // listen and create server socket
-    mx->video_server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (mx->video_server_socket < 0)
-    {
-        ALOGE("MXCamEnc: create video server socket failed");
-        return -1;
-    }
+    // mx->video_server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    // if (mx->video_server_socket < 0)
+    // {
+    //     ALOGE("MXCamEnc: create video server socket failed");
+    //     return -1;
+    // }
 
-    in_addr_t addr = inet_addr(mx->listen_ip);
+    // in_addr_t addr = inet_addr(mx->listen_ip);
 
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(addr);
-    server_addr.sin_port = htons(mx->video_port);
-    if (bind(mx->video_server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-    {
-        ALOGE("MXCamEnc: bind video server socket failed");
-        close(mx->video_server_socket);
-        return -1;
-    }
-    if (listen(mx->video_server_socket, 1) < 0)
-    {
-        ALOGE("MXCamEnc: listen video server socket failed");
-        close(mx->video_server_socket);
-        return -1;
-    }
+    // struct sockaddr_in server_addr;
+    // memset(&server_addr, 0, sizeof(server_addr));
+    // server_addr.sin_family = AF_INET;
+    // server_addr.sin_addr.s_addr = htonl(addr);
+    // server_addr.sin_port = htons(mx->video_port);
+    // if (bind(mx->video_server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+    // {
+    //     ALOGE("MXCamEnc: bind video server socket failed");
+    //     close(mx->video_server_socket);
+    //     return -1;
+    // }
+    // if (listen(mx->video_server_socket, 1) < 0)
+    // {
+    //     ALOGE("MXCamEnc: listen video server socket failed");
+    //     close(mx->video_server_socket);
+    //     return -1;
+    // }
 
     pthread_create(&mx->video_io_worker, NULL, video_io_threadfunc, mx);
     ALOGD("MXCamEnc: video_io_threadfunc create %d\n", mx->phone);
