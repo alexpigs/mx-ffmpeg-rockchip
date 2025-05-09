@@ -1,0 +1,31 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(gdb) Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/ffmpeg_g",
+            "args": [ "-loglevel","info",
+                    "-hwaccel","rkmpp",
+                    "-hwaccel_output_format","drm_prime",
+                    "-i","rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc",
+                    "-vf","hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12",
+                    "-vsync","2",
+                    "-f","mxcam","-phone","1",
+                    "-"
+                ],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+            ]
+        }
+
+    ]
+}

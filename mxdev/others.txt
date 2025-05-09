@@ -1,0 +1,10 @@
+
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --target-os=linux --arch=aarch64  --extra-cflags="-D__USE_GNU" --extra-ldflags="-ldl"
+
+
+./ffmpeg -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -vsync 2 -f null -
+
+
+
+
+./ffmpeg -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12" -vsync 2 -f mxcam -

@@ -1,0 +1,21 @@
+{
+    "files.associations": {
+        "mux.h": "c",
+        "imgutils.h": "c",
+        "avformat.h": "c",
+        "pixdesc.h": "c",
+        "opt.h": "c",
+        "avdevice.h": "c",
+        "frame.h": "c",
+        "types.h": "c",
+        "packet_internal.h": "c",
+        "avio_internal.h": "c",
+        "stdint.h": "c",
+        "string": "c",
+        "fcntl.h": "c",
+        "mxcamenc_common.h": "c",
+        "stdlib.h": "c",
+        "poll.h": "c",
+        "unistd.h": "c"
+    }
+}
