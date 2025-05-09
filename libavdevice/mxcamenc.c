@@ -31,7 +31,7 @@ static int write_header(AVFormatContext *s1)
         s1->url,
         mx->phone);
 
-    if (mxcam_open_pipes(mx) < 0) {
+    if (mxcam_start_server_socket(mx) < 0) {
         ALOGE("MXCamEnc: open fifo failed\n");
         return AVERROR(EIO);
     }
@@ -79,6 +79,22 @@ static const AVOption options[] = {
         {.i64 = 0 }, INT_MIN, INT_MAX,
         AV_OPT_FLAG_ENCODING_PARAM 
     },
+    { "audio_port", 
+        "set audio_port",       
+        OFFSET(audio_port), 
+        AV_OPT_TYPE_INT,  
+        {.i64 = 0 }, INT_MIN, INT_MAX,
+        AV_OPT_FLAG_ENCODING_PARAM 
+    },
+    { "video_port", 
+        "set video_port ",       
+        OFFSET(video_port), 
+        AV_OPT_TYPE_INT,  
+        {.i64 = 0 }, INT_MIN, INT_MAX,
+        AV_OPT_FLAG_ENCODING_PARAM 
+    },
+    { "listen_ip", "set listen_ip",       OFFSET(listen_ip), AV_OPT_TYPE_STRING, {.str = "0.0.0.0" }, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
+
     { NULL }
 
 };

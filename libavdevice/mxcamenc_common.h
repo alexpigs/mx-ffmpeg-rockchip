@@ -93,21 +93,20 @@ typedef struct {
     void *ctx;
     /*options*/
     int phone;
+    int audio_port;
+    int video_port;
+    char *listen_ip;
 
     /* context */
+    int is_stop;
     int audio_stream_idx;
     int video_stream_idx;
 
-    int audio_data_fd;
-    int audio_cmd_fd;
-
-    int video_data_fd;
-    int video_cmd_fd;
-
+    int audio_server_socket;
+    int video_server_socket;
     
     pthread_t audio_io_worker;
     pthread_t video_io_worker;
-
     
     pthread_mutex_t vl_mutex;
     pthread_cond_t vl_cond;   
