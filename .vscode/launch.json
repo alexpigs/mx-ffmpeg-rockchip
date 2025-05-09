@@ -9,7 +9,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/ffmpeg_g",
-            "args": [ "-loglevel","info",
+            "args": [ "-loglevel","debug",
                     "-hwaccel","rkmpp",
                     "-hwaccel_output_format","drm_prime",
                     "-i","rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc",

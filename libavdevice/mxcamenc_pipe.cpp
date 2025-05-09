@@ -20,12 +20,31 @@
 #include "mxcamenc_pipe.h"
 
 
-#define VCTRL_FILE "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/camera.ctl"
-#define VREPLY_FILE "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/camera.reply"
-#define ACRTL_FILE "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/audio.ctl"
-#define AREPLY_FILE "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/audio.reply"
+static const char* VCTRL_FILE = "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/camera.ctl";
+static const char* VREPLY_FILE = "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/camera.reply";
+static const char* ACRTL_FILE = "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/audio.ctl";
+static const char* AREPLY_FILE = "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/audio.reply";
 
-static int open_fd(const char *fmt, int phone)
+static int open_ctl_fd(const char *fmt, int phone)
+{
+    char full_path[256] = {0};
+    snprintf(full_path, sizeof(full_path) -1, fmt, phone);
+
+    if (access(full_path, F_OK)){
+        mkfifo(full_path, 0666);
+    }
+
+    chmod(full_path, 0666);
+    int fd = open(full_path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+        ALOGE("MXCamEnc: open fifo %s failed", full_path);
+        return -1;
+    }
+    
+    return fd;
+}
+
+static int open_data_fd(const char *fmt, int phone)
 {
     char full_path[256] = {0};
     snprintf(full_path, sizeof(full_path) -1, fmt, phone);
@@ -37,7 +56,7 @@ static int open_fd(const char *fmt, int phone)
     chmod(full_path, 0666);
     int fd = open(full_path, O_RDWR | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) {
-        av_log(NULL, AV_LOG_ERROR, "MXCamEnc: open fifo %s failed\n", full_path);
+        ALOGE("MXCamEnc: open fifo %s failed", full_path);
         return -1;
     }
     
@@ -48,15 +67,12 @@ static int open_fd(const char *fmt, int phone)
 
 int mxcam_open_pipes(MxContext *mx)
 {
-    char path[256];
-
-    av_log(NULL, AV_LOG_INFO, "MXCamEnc: mxcam_open_pipes");
     ALOGD("MXCamEnc: open fifo phone=%d", mx->phone);
 
-    mx->video_cmd_fd = open_fd(VCTRL_FILE, mx->phone);
-    mx->video_data_fd = open_fd(VREPLY_FILE, mx->phone);
-    mx->audio_cmd_fd = open_fd(ACRTL_FILE, mx->phone);
-    mx->audio_data_fd = open_fd(AREPLY_FILE, mx->phone);
+    mx->video_cmd_fd = open_ctl_fd(VCTRL_FILE, mx->phone);
+    mx->video_data_fd = open_data_fd(VREPLY_FILE, mx->phone);
+    mx->audio_cmd_fd = open_ctl_fd(ACRTL_FILE, mx->phone);
+    mx->audio_data_fd = open_data_fd(AREPLY_FILE, mx->phone);
     if (mx->video_cmd_fd < 0 || mx->video_data_fd < 0 ||
         mx->audio_cmd_fd < 0 || mx->audio_data_fd < 0) {
             ALOGE("MXCamEnc: open fifo failed");

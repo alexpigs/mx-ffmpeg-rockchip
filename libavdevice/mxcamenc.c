@@ -27,12 +27,12 @@ static int write_header(AVFormatContext *s1)
 {
     MxContext *mx = s1->priv_data;
 
-    av_log(s1, AV_LOG_INFO, "MXCamEnc: write_header url=%s,phone=%d\n", 
+    ALOGD("MXCamEnc: write_header url=%s,phone=%d\n", 
         s1->url,
         mx->phone);
 
     if (mxcam_open_pipes(mx) < 0) {
-        av_log(s1, AV_LOG_ERROR, "MXCamEnc: open fifo failed\n");
+        ALOGE("MXCamEnc: open fifo failed\n");
         return AVERROR(EIO);
     }
 
@@ -42,14 +42,14 @@ static int write_header(AVFormatContext *s1)
 static int write_packet(AVFormatContext *s1, AVPacket *pkt)
 {
     MxContext *mx = s1->priv_data;
-    av_log(s1, AV_LOG_INFO, "MXCamEnc: write_packet %d\n", mx->phone);
+    ALOGD("MXCamEnc: write_packet %d\n", mx->phone);
 
     return 0;
 }
 
 static int write_trailer(AVFormatContext *s1)
 {
-    av_log(s1, AV_LOG_INFO, "MXCamEnc: write_trailer\n");
+    ALOGD("MXCamEnc: write_trailer\n");
     return 0;
 }
 

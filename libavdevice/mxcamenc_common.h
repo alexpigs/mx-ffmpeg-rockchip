@@ -34,22 +34,22 @@ static inline void __log_print__x123(int level, const char *fmt, va_list args)
     switch (level)
     {
     case 0:
-        av_log(NULL, AV_LOG_TRACE, "%s", buffer);
+        av_log(NULL, AV_LOG_VERBOSE, "%s\n", buffer);
         break;
     case 1:
-        av_log(NULL, AV_LOG_DEBUG, "%s",(buffer));
+        av_log(NULL, AV_LOG_WARNING, "%s\n",(buffer));
         break;
     case 2:
-        av_log(NULL, AV_LOG_INFO, "%s",(buffer));
+        av_log(NULL, AV_LOG_WARNING, "%s\n",(buffer));
         break;
     case 3:
-        av_log(NULL, AV_LOG_WARNING, "%s",(buffer));
+        av_log(NULL, AV_LOG_WARNING, "%s\n",(buffer));
         break;
     case 4:
-        av_log(NULL, AV_LOG_ERROR, "%s",(buffer));
+        av_log(NULL, AV_LOG_ERROR, "%s\n",(buffer));
         break;
     default:
-        av_log(NULL, AV_LOG_TRACE, "%s",(buffer));
+        av_log(NULL, AV_LOG_VERBOSE, "%s\n",(buffer));
         break;
     }
 }
@@ -62,31 +62,26 @@ static inline void __log_print__(int level, const char *fmt, ...)
     va_end(args);
 }
 
-// #define ALOGV(fmt, ...) {printf(fmt, ##__VA_ARGS__);printf("\n");}
-// #define ALOGD(fmt, ...) {printf(fmt, ##__VA_ARGS__);printf("\n");}
-// #define ALOGI(fmt, ...) {printf(fmt, ##__VA_ARGS__);printf("\n");}
-// #define ALOGW(fmt, ...) {printf(fmt, ##__VA_ARGS__);printf("\n");}
-// #define ALOGE(fmt, ...) {printf(fmt, ##__VA_ARGS__);printf("\n");}
 
 #define ALOGV(fmt, ...)                       \
     {                                         \
-        __log_print__(0, fmt, ##__VA_ARGS__); \
+        __log_print__(0, "%s:%s:%d "#fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
     }
 #define ALOGD(fmt, ...)                       \
     {                                         \
-        __log_print__(1, fmt, ##__VA_ARGS__); \
+        __log_print__(1, "%s:%s:%d "#fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
     }
 #define ALOGI(fmt, ...)                       \
     {                                         \
-        __log_print__(2, fmt, ##__VA_ARGS__); \
+        __log_print__(2, "%s:%s:%d "#fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
     }
 #define ALOGW(fmt, ...)                       \
     {                                         \
-        __log_print__(3, fmt, ##__VA_ARGS__); \
+        __log_print__(3, "%s:%s:%d "#fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
     }
 #define ALOGE(fmt, ...)                       \
     {                                         \
-        __log_print__(4, fmt, ##__VA_ARGS__); \
+        __log_print__(4, "%s:%s:%d "#fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); \
     }
 
 
