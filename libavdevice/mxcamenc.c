@@ -36,15 +36,32 @@ static int write_header(AVFormatContext *s1)
         return AVERROR(EIO);
     }
 
+    mx->audio_stream_idx = -1;
+    mx->video_stream_idx = -1;
+
+    for (int i = 0; i < s1->nb_streams; i++) {
+        AVStream *st = s1->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            mx->audio_stream_idx = i;
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            mx->video_stream_idx = i;
+        }
+    }
+
+    if (mx->audio_stream_idx < 0) {
+        ALOGE("MXCamEnc: no audio stream present\n");
+    }
+
+    if (mx->video_stream_idx < 0) {
+        ALOGE("MXCamEnc: no video stream present\n");
+    }
+
     return 0;
 }
 
 static int write_packet(AVFormatContext *s1, AVPacket *pkt)
 {
-    MxContext *mx = s1->priv_data;
-    ALOGD("MXCamEnc: write_packet %d\n", mx->phone);
-
-    return 0;
+    return mxcam_handle_packet(s1, pkt);
 }
 
 static int write_trailer(AVFormatContext *s1)

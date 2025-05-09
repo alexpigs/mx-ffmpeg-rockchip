@@ -64,6 +64,14 @@ static int open_data_fd(const char *fmt, int phone)
     return fd;
 }
 
+static void* audio_io_threadfunc(void *arg)
+{
+    MxContext *mx = (MxContext*)arg;
+    ALOGD("MXCamEnc: audio_io_threadfunc %d\n", mx->phone);
+
+    return 0;
+}
+
 
 int mxcam_open_pipes(MxContext *mx)
 {
@@ -81,6 +89,30 @@ int mxcam_open_pipes(MxContext *mx)
 
     ALOGD("MXCamEnc: open fifo ok");
 
+    return 0;
+}
+
+int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt){
+
+    MxContext *mx = (MxContext*)s1->priv_data;
+    ALOGD("MXCamEnc: write_packet %d\n", mx->phone);
+
+    // 将packet放到对应的list
+    if (pkt->stream_index == mx->audio_stream_idx) {
+        pthread_mutex_lock(&mx->al_mutex);
+        avpriv_packet_list_put(&mx->audio_list, pkt, NULL, 0);
+        pthread_cond_signal(&mx->al_cond);
+        pthread_mutex_unlock(&mx->al_mutex);
+
+    } else if (pkt->stream_index == mx->video_stream_idx) {
+        pthread_mutex_lock(&mx->vl_mutex);
+        avpriv_packet_list_put(&mx->video_list, pkt, NULL, 0);
+        pthread_cond_signal(&mx->vl_cond);
+        pthread_mutex_unlock(&mx->vl_mutex);
+    } else {
+        ALOGE("MXCamEnc: unknown stream index %d\n", pkt->stream_index);
+        return AVERROR(EINVAL);
+    }
     return 0;
 }
 

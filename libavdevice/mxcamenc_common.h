@@ -22,6 +22,7 @@ extern "C" {
 #include "libavformat/avformat.h"
 #include "libavformat/mux.h"
 #include "avdevice.h"
+#include "libavutil/thread.h"
 
 #ifdef __cplusplus
 }
@@ -93,13 +94,27 @@ typedef struct {
     /*options*/
     int phone;
 
+    /* context */
+    int audio_stream_idx;
+    int video_stream_idx;
+
     int audio_data_fd;
     int audio_cmd_fd;
 
     int video_data_fd;
     int video_cmd_fd;
 
+    
+    pthread_t audio_io_worker;
+    pthread_t video_io_worker;
+
+    
+    pthread_mutex_t vl_mutex;
+    pthread_cond_t vl_cond;   
     PacketList video_list;
+
+    pthread_mutex_t al_mutex;  
+    pthread_cond_t al_cond; 
     PacketList audio_list;
 } MxContext;
 

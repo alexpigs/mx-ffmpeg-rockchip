@@ -16,6 +16,8 @@
         "mxcamenc_common.h": "c",
         "stdlib.h": "c",
         "poll.h": "c",
-        "unistd.h": "c"
+        "unistd.h": "c",
+        "thread.h": "c",
+        "threads.h": "c"
     }
 }

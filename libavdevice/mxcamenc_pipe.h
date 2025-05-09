@@ -10,6 +10,8 @@ extern "C" {
 int mxcam_open_pipes(MxContext *mx);
 int mxcam_close_pipes(MxContext *mx);
 
+int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt);
+
 #ifdef __cplusplus
 }
 #endif
