@@ -23,99 +23,99 @@
 #include "mxcamenc_common.h"
 #include "mxcamenc_pipe.h"
 
-static int write_header(AVFormatContext *s1)
-{
-    MxContext *mx = s1->priv_data;
+static int write_header(AVFormatContext *s1) {
+  MxContext *mx = s1->priv_data;
 
-    ALOGD("MXCamEnc: write_header url=%s,phone=%d\n", 
-        s1->url,
-        mx->phone);
+  ALOGD("MXCamEnc: write_header url=%s,phone=%d\n", s1->url, mx->phone);
 
-    if (mxcam_start_server_socket(mx) < 0) {
-        ALOGE("MXCamEnc: open fifo failed\n");
-        return AVERROR(EIO);
+  if (mxcam_start_server_socket(mx) < 0) {
+    ALOGE("MXCamEnc: open fifo failed\n");
+    return AVERROR(EIO);
+  }
+
+  mx->audio_stream_idx = -1;
+  mx->video_stream_idx = -1;
+
+  for (int i = 0; i < s1->nb_streams; i++) {
+    AVStream *st = s1->streams[i];
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+
+      mx->audio_stream_idx = i;
+    } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+      mx->video_stream_idx = i;
     }
+  }
 
-    mx->audio_stream_idx = -1;
-    mx->video_stream_idx = -1;
+  if (mx->audio_stream_idx < 0) {
+    ALOGE("MXCamEnc: no audio stream present\n");
+  }
 
-    for (int i = 0; i < s1->nb_streams; i++) {
-        AVStream *st = s1->streams[i];
-        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            mx->audio_stream_idx = i;
-        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            mx->video_stream_idx = i;
-        }
-    }
+  if (mx->video_stream_idx < 0) {
+    ALOGE("MXCamEnc: no video stream present\n");
+  }
 
-    if (mx->audio_stream_idx < 0) {
-        ALOGE("MXCamEnc: no audio stream present\n");
-    }
-
-    if (mx->video_stream_idx < 0) {
-        ALOGE("MXCamEnc: no video stream present\n");
-    }
-
-    return 0;
+  return 0;
 }
 
-static int write_packet(AVFormatContext *s1, AVPacket *pkt)
-{
-    return mxcam_handle_packet(s1, pkt);
+static int write_packet(AVFormatContext *s1, AVPacket *pkt) {
+  return mxcam_handle_packet(s1, pkt);
 }
 
-static int write_trailer(AVFormatContext *s1)
-{
-    ALOGD("MXCamEnc: write_trailer\n");
-    return 0;
+static int write_trailer(AVFormatContext *s1) {
+  ALOGD("MXCamEnc: write_trailer\n");
+  MxContext *mx = s1->priv_data;
+  return mxcam_top_server(mx);
 }
 
 #define OFFSET(x) offsetof(MxContext, x)
-static const AVOption options[] = {
-    { "phone", 
-        "set phone id",       
-        OFFSET(phone), 
-        AV_OPT_TYPE_INT,  
-        {.i64 = 0 }, INT_MIN, INT_MAX,
-        AV_OPT_FLAG_ENCODING_PARAM 
-    },
-    { "audio_port", 
-        "set audio_port",       
-        OFFSET(audio_port), 
-        AV_OPT_TYPE_INT,  
-        {.i64 = 0 }, INT_MIN, INT_MAX,
-        AV_OPT_FLAG_ENCODING_PARAM 
-    },
-    { "video_port", 
-        "set video_port ",       
-        OFFSET(video_port), 
-        AV_OPT_TYPE_INT,  
-        {.i64 = 0 }, INT_MIN, INT_MAX,
-        AV_OPT_FLAG_ENCODING_PARAM 
-    },
-    { "listen_ip", "set listen_ip",       OFFSET(listen_ip), AV_OPT_TYPE_STRING, {.str = "0.0.0.0" }, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
+static const AVOption options[] = {{"phone",
+                                    "set phone id",
+                                    OFFSET(phone),
+                                    AV_OPT_TYPE_INT,
+                                    {.i64 = 0},
+                                    INT_MIN,
+                                    INT_MAX,
+                                    AV_OPT_FLAG_ENCODING_PARAM},
 
-    { NULL }
+                                   {"listen_ip",
+                                    "set listen_ip",
+                                    OFFSET(listen_ip),
+                                    AV_OPT_TYPE_STRING,
+                                    {.str = "0.0.0.0"},
+                                    0,
+                                    0,
+                                    AV_OPT_FLAG_ENCODING_PARAM},
+
+                                   {"listen_port",
+                                    "set listen_port",
+                                    OFFSET(listen_port),
+                                    AV_OPT_TYPE_INT,
+                                    {.i64 = 10200},
+                                    INT_MIN,
+                                    INT_MAX,
+                                    AV_OPT_FLAG_ENCODING_PARAM},
+
+                                   {NULL}
 
 };
 
 static const AVClass mxcam_class = {
     .class_name = "Maxia Camera outdev",
-    .item_name  = av_default_item_name,
-    .option     = options,
-    .version    = LIBAVUTIL_VERSION_INT,
-    .category   = AV_CLASS_CATEGORY_DEVICE_VIDEO_OUTPUT,
+    .item_name = av_default_item_name,
+    .option = options,
+    .version = LIBAVUTIL_VERSION_INT,
+    .category = AV_CLASS_CATEGORY_DEVICE_VIDEO_OUTPUT,
 };
 
 const FFOutputFormat ff_mxcam_muxer = {
-    .p.name         = "mxcam",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("Maxia Camera output device"),
-    .p.audio_codec  = AV_NE(AV_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16LE),
-    .p.video_codec  = AV_CODEC_ID_WRAPPED_AVFRAME,
-    .p.flags        = AVFMT_NOFILE,
-    .p.priv_class    = &mxcam_class,
+    .p.name = "mxcam",
+    .p.long_name = NULL_IF_CONFIG_SMALL("Maxia Camera output device"),
+    .p.audio_codec = AV_NE(AV_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16LE),
+    .p.video_codec = AV_CODEC_ID_WRAPPED_AVFRAME,
+    .p.flags = AVFMT_NOFILE,
+    .p.priv_class = &mxcam_class,
     .priv_data_size = sizeof(MxContext),
-    .write_header   = write_header,
-    .write_packet   = write_packet,
-    .write_trailer  = write_trailer,
+    .write_header = write_header,
+    .write_packet = write_packet,
+    .write_trailer = write_trailer,
 };

@@ -9,25 +9,37 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/ffmpeg_g",
-            "args": [ "-loglevel","debug",
-                    //"-hwaccel","rkmpp",
-                    //"-hwaccel_output_format","drm_prime",
-                    "-i","rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc",
-                    //"-vf","hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12",
-                    "-vf","scale=1080:-1,format=nv12",
-                    "-vsync","2",
-                    "-f","mxcam","-phone","1", "-audio_port", "10200", 
-                    "-video_port", "10201", "-listen_ip", "0.0.0.0",
-                    "-"
-                ],
+            "args": [
+                "-loglevel",
+                "warning",
+                //"-hwaccel","rkmpp",
+                //"-hwaccel_output_format","drm_prime",
+                "-stream_loop",
+                "-1",
+                "-i",
+                // "rtmp://47.100.44.74/myapp/9b57184ca3ac3cab71cbc151e619a764",
+                "/home/zxe/test2.mp4",
+                //"-vf","hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12",
+                "-vf",
+                "scale=1080:-1,format=nv12",
+                "-vsync",
+                "2",
+                "-f",
+                "mxcam",
+                "-phone",
+                "1",
+                "-listen_port",
+                "10201",
+                "-listen_ip",
+                "0.0.0.0",
+                "-"
+            ],
             "stopAtEntry": false,
             "cwd": "${fileDirname}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "setupCommands": [
-            ]
+            "setupCommands": []
         }
-
     ]
 }

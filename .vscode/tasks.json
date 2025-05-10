@@ -1,19 +1,21 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-      {
-        "label": "build",
-        "type": "shell",
-        "command": "make",
-        "args": [
-          "-j",
-          "8"
-        ],
-        "group": {
-          "kind": "build",
-          "isDefault": true
-        },
-        "problemMatcher": ["$gcc"]
-      }
-    ]
-  }
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "make",
+      "args": [
+        "-j",
+        "32"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    }
+  ]
+}
