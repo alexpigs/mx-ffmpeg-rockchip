@@ -199,7 +199,7 @@ private:
       }
 
       std::vector<boost::asio::const_buffer> reply_buffers;
-      reply_buffers.push_back(boost::asio::buffer(reply_header));
+      reply_buffers.push_back(boost::asio::buffer(reply_header, 11));
       if (reply_size > 0) {
         reply_buffers.push_back(boost::asio::buffer(reply, reply_size));
       }

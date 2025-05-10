@@ -11,7 +11,7 @@
             "program": "${workspaceFolder}/ffmpeg_g",
             "args": [
                 "-loglevel",
-                "verbose",
+                "warning",
                 "-re",
                 "-hwaccel",
                 "rkmpp",
