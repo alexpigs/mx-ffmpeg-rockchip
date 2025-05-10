@@ -139,7 +139,8 @@ public:
 
   void stop() {
     mTimer.cancel();
-    mClientSocket.close();
+    if (mClientSocket.is_open())
+      mClientSocket.close();
     if (mReplyBuf) {
       free(mReplyBuf);
       mReplyBuf = NULL;

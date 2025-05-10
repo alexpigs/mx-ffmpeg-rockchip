@@ -7,7 +7,7 @@
       "command": "make",
       "args": [
         "-j",
-        "32"
+        "8"
       ],
       "group": {
         "kind": "build",
