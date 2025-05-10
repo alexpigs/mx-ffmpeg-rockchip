@@ -191,9 +191,6 @@ private:
         return;
       }
 
-      static const char *ok_null_msg = "00000003ok\0";
-      static int ok_null_msg_size = 11;
-
       static char reply_header[16] = {0};
       if (reply_size > 0) {
         snprintf(reply_header, sizeof(reply_header), "%08xok:", reply_size + 3);

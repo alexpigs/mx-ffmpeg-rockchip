@@ -5,6 +5,7 @@
 #include <poll.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -26,63 +27,47 @@ extern "C" {
 }
 #endif
 
-static inline void __log_print__x123(int level, const char *fmt, va_list args) {
-  char buffer[1024] = {0};
+static inline void __log_print__x123(int level, const char *fmt, const char *f,
+                                     const char *func, int line, va_list args) {
+  char buffer[2048] = {0};
+  long msec = 0, usec = 0;
+  static struct timeval last_time = {0, 0};
+  struct timeval cur;
+  gettimeofday(&cur, NULL);
+  if (last_time.tv_sec == 0 && last_time.tv_usec == 0) {
+    last_time = cur;
+  }
+  msec = (cur.tv_sec - last_time.tv_sec) * 1000 +
+         (cur.tv_usec - last_time.tv_usec) / 1000;
+  usec = (cur.tv_sec - last_time.tv_sec) * 1000000 +
+         (cur.tv_usec - last_time.tv_usec);
+  last_time.tv_sec = cur.tv_sec;
+  last_time.tv_usec = cur.tv_usec;
+
   vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
-  switch (level) {
-  case 0:
-    av_log(NULL, AV_LOG_VERBOSE, "%s\n", buffer);
-    break;
-  case 1:
-    av_log(NULL, AV_LOG_WARNING, "%s\n", (buffer));
-    break;
-  case 2:
-    av_log(NULL, AV_LOG_WARNING, "%s\n", (buffer));
-    break;
-  case 3:
-    av_log(NULL, AV_LOG_WARNING, "%s\n", (buffer));
-    break;
-  case 4:
-    av_log(NULL, AV_LOG_ERROR, "%s\n", (buffer));
-    break;
-  default:
-    av_log(NULL, AV_LOG_VERBOSE, "%s\n", (buffer));
-    break;
+
+  if (level == 4) {
+    printf("\033[31m%s\033[0m:%ldus \033[32m%s:%d \033[33m%s\033[0m\n", "ERROR",
+           usec, func, line, buffer);
+  } else {
+    printf("\033[34m%s\033[0m:%ldus \033[32m%s:%d \033[33m%s\033[0m\n", "DEBUG",
+           usec, func, line, buffer);
   }
 }
 
-static inline void __log_print__(int level, const char *fmt, ...) {
+static inline void __log_print__(int level, const char *fmt, const char *f,
+                                 const char *func, int line, ...) {
   va_list args;
-  va_start(args, fmt);
-  __log_print__x123(level, fmt, args);
+  va_start(args, line);
+  __log_print__x123(level, fmt, f, func, line, args);
   va_end(args);
 }
 
-#define ALOGV(fmt, ...)                                                        \
-  {                                                                            \
-    __log_print__(0, "%s:%s:%d " #fmt, __FILE__, __FUNCTION__, __LINE__,       \
-                  ##__VA_ARGS__);                                              \
-  }
 #define ALOGD(fmt, ...)                                                        \
-  {                                                                            \
-    __log_print__(1, "%s:%s:%d " #fmt, __FILE__, __FUNCTION__, __LINE__,       \
-                  ##__VA_ARGS__);                                              \
-  }
-#define ALOGI(fmt, ...)                                                        \
-  {                                                                            \
-    __log_print__(2, "%s:%s:%d " #fmt, __FILE__, __FUNCTION__, __LINE__,       \
-                  ##__VA_ARGS__);                                              \
-  }
-#define ALOGW(fmt, ...)                                                        \
-  {                                                                            \
-    __log_print__(3, "%s:%s:%d " #fmt, __FILE__, __FUNCTION__, __LINE__,       \
-                  ##__VA_ARGS__);                                              \
-  }
+  { __log_print__(1, fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+
 #define ALOGE(fmt, ...)                                                        \
-  {                                                                            \
-    __log_print__(4, "%s:%s:%d " #fmt, __FILE__, __FUNCTION__, __LINE__,       \
-                  ##__VA_ARGS__);                                              \
-  }
+  { __log_print__(4, fmt, __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__); }
 
 typedef struct {
   const AVClass *cclass;
