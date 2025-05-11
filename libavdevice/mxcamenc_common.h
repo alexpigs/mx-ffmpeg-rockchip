@@ -78,10 +78,17 @@ typedef struct {
   char *listen_ip;
 
   /* context */
-  void *mx_server;
+  void *mx_sockserver;
+  void *mx_video_pipeserver;
   int is_stop;
   int audio_stream_idx;
   int video_stream_idx;
+
+  int video_width;
+  int video_height;
+  int video_format;
+  int video_fps;
+  int video_bitrate;
 
   pthread_t io_worker;
 

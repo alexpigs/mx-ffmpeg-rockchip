@@ -31,6 +31,8 @@
 #include <string.h>
 #include <vector>
 
+#include "im2d.h"
+#include "mxcam_dma_allocator.h"
 #include <chrono>
 #include <map>
 #include <memory>
@@ -38,6 +40,7 @@
 #include <string>
 #include <vector>
 
+#define MAX_CMD_SIZE 1024
 using namespace std::chrono;
 using boost::asio::ip::tcp;
 
@@ -65,18 +68,439 @@ static inline int _parse_query(const char *query, char *query_name,
   return 0;
 }
 
-#define MAX_CMD_SIZE 1024
+static inline int pipe_read_string(int fd, char *buffer, int size,
+                                   int timeout_ms) {
+  int bytes_read = 0;
+  int ret = -1;
+  steady_clock::time_point start_tp = steady_clock::now();
+  steady_clock::time_point end_tp;
+  while (bytes_read < size) {
+    pollfd fds[] = {{
+        .fd = fd,
+        .events = POLLIN | POLLHUP,
+        .revents = 0,
+    }};
+
+    end_tp = steady_clock::now();
+    auto elapsed_time =
+        duration_cast<std::chrono::milliseconds>(end_tp - start_tp);
+    if (timeout_ms > 0 && elapsed_time.count() > timeout_ms) {
+      ALOGE("pipe_read_data timeout");
+      return -1;
+    }
+
+    ret = poll(fds, 1, timeout_ms);
+
+    if (ret == 0) {
+      continue;
+    } else if (ret == -1) {
+      ALOGE("error poll %d, err=%s", ret, strerror(errno));
+      return -1;
+    }
+
+    if (fds[0].revents & (POLLHUP)) {
+      ALOGE("poll POLLHUP, failed");
+      return -1;
+    } else if (fds[0].revents & POLLIN) {
+      /*
+      If all file descriptors referring to the write end of a pipe have
+       been closed, then an attempt to read(2) from the pipe will see
+       end-of-file (read(2) will return 0).
+       */
+      while ((ret = read(fd, buffer + bytes_read, size - bytes_read)) > 0) {
+        ALOGD("pipe_read_data ret=%d, bytes_read=%d, size=%d", ret, bytes_read,
+              size);
+        if (bytes_read + ret >= size) {
+          break;
+        }
+
+        bytes_read += ret;
+
+        if (buffer[bytes_read - 1] == '\0') {
+          return bytes_read;
+        }
+      }
+
+      if (ret == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          continue;
+        } else {
+          ALOGE("read error %d, err=%s", ret, strerror(errno));
+          return -1;
+        }
+      }
+
+      // all reader closed..
+      if (ret == 0) {
+        return -1;
+      }
+
+    } else {
+      ALOGE("unknown events %08x", fds[0].revents);
+      return -1;
+    }
+  }
+
+  ALOGE("error pipe_read_data ret=%d err=%s", ret, strerror(errno));
+  return ret;
+}
+
+static inline int pipe_read_data(int fd, char *buffer, int size,
+                                 int timeout_ms) {
+  int bytes_read = 0;
+  int ret = -1;
+  steady_clock::time_point start_tp = steady_clock::now();
+  steady_clock::time_point end_tp;
+  while (bytes_read < size) {
+    pollfd fds[] = {{
+        .fd = fd,
+        .events = POLLIN | POLLHUP,
+        .revents = 0,
+    }};
+
+    end_tp = steady_clock::now();
+    auto elapsed_time =
+        duration_cast<std::chrono::milliseconds>(end_tp - start_tp);
+    if (timeout_ms > 0 && elapsed_time.count() > timeout_ms) {
+      ALOGE("pipe_read_data timeout");
+      ret = -1;
+      break;
+    }
+
+    ret = poll(fds, 1, timeout_ms);
+
+    if (ret == 0) {
+      continue;
+    } else if (ret == -1) {
+      ALOGE("error poll %d, err=%s", ret, strerror(errno));
+      break;
+    }
+
+    if (fds[0].revents & (POLLHUP)) {
+      ALOGE("poll POLLHUP, failed");
+      break;
+    } else if (fds[0].revents & POLLIN) {
+      /*
+      If all file descriptors referring to the write end of a pipe have
+       been closed, then an attempt to read(2) from the pipe will see
+       end-of-file (read(2) will return 0).
+       */
+      while ((ret = read(fd, buffer + bytes_read, size - bytes_read)) > 0) {
+        ALOGD("pipe_read_data ret=%d, bytes_read=%d, size=%d", ret, bytes_read,
+              size);
+        bytes_read += ret;
+      }
+
+      if (bytes_read == size) {
+        return size;
+      }
+
+      if (ret == -1) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          continue;
+        } else {
+          ALOGE("read error %d, err=%s", ret, strerror(errno));
+          return -1;
+        }
+      }
+
+      // all reader closed..
+      if (ret == 0) {
+        return -1;
+      }
+
+    } else {
+      ALOGE("unknown events %08x", fds[0].revents);
+      break;
+    }
+  }
+
+  ALOGE("error pipe_read_data ret=%d err=%s", ret, strerror(errno));
+  return ret;
+}
+
+static inline int pipe_write_data(int fd, const char *buffer, int size,
+                                  int timeout_ms) {
+  int bytes_written = 0;
+  int ret = -1;
+
+  steady_clock::time_point start_tp = steady_clock::now();
+  steady_clock::time_point end_tp;
+
+  while (bytes_written < size) {
+    pollfd fds[] = {{
+        .fd = fd,
+        .events = POLLOUT | POLLHUP,
+        .revents = 0,
+    }};
+
+    end_tp = steady_clock::now();
+    auto elapsed_time =
+        duration_cast<std::chrono::milliseconds>(end_tp - start_tp);
+    if (timeout_ms > 0 && elapsed_time.count() > timeout_ms) {
+      ALOGE("timeout");
+      ret = -1;
+      break;
+    }
+
+    ret = poll(fds, 1, timeout_ms);
+
+    if (ret == 0) {
+      continue;
+    } else if (ret == -1) {
+      ALOGE("error poll %d, err=%s", ret, strerror(errno));
+      break;
+    }
+
+    if (fds[0].revents & (POLLHUP | POLLERR)) {
+      ALOGE("poll POLLHUP, failed");
+      break;
+    } else if (fds[0].revents & POLLOUT) {
+      /*
+        If all file descriptors referring to the read end of a pipe have been
+       closed, then a write(2) will cause a SIGPIPE signal to be generated for
+       the calling process.  If the calling process is ignoring this signal,
+       then write(2) fails with the error EPIPE.
+       */
+      ret = write(fd, buffer + bytes_written, size - bytes_written);
+      if (ret == 0 || ret == -1) {
+        if (errno == EAGAIN) {
+          continue;
+        } else if (errno == EPIPE) {
+          ALOGE("noreader, write error %d, err=%s", ret, strerror(errno));
+          return -1;
+        } else {
+          ALOGE("write error %d, err=%s", ret, strerror(errno));
+          return -1;
+        }
+      }
+
+      bytes_written += ret;
+
+      if (bytes_written == size) {
+        return size;
+      }
+    } else {
+      ALOGE("unknown events %08x", fds[0].revents);
+      break;
+    }
+  }
+  return ret;
+}
+
+class MxImage2D {
+#define MAX_WIDTH 4096
+#define MAX_HEIGHT 4096
+#define DEFAULT_DMA_BUFFER_SIZE (MAX_WIDTH * MAX_HEIGHT * 4)
+  int mDmaBufferFd1 = 0;
+  int mDmaBufferFd2 = 0;
+
+  char *mDmaBuffer1 = nullptr;
+  char *mDmaBuffer2 = nullptr;
+
+  rga_buffer_handle_t mDmaBufferHandle1 = 0;
+  rga_buffer_handle_t mDmaBufferHandle2 = 0;
+
+private:
+  MxImage2D() {}
+  ~MxImage2D() {}
+
+  void destroy() {
+    if (mDmaBufferHandle1) {
+      releasebuffer_handle(mDmaBufferHandle1);
+      mDmaBufferHandle1 = 0;
+    }
+    if (mDmaBufferHandle2) {
+      releasebuffer_handle(mDmaBufferHandle2);
+      mDmaBufferHandle2 = 0;
+    }
+    if (mDmaBuffer1) {
+      dma_buf_free(DEFAULT_DMA_BUFFER_SIZE, &mDmaBufferFd1, mDmaBuffer1);
+      mDmaBuffer1 = nullptr;
+    }
+    if (mDmaBuffer2) {
+      dma_buf_free(DEFAULT_DMA_BUFFER_SIZE, &mDmaBufferFd2, mDmaBuffer2);
+      mDmaBuffer2 = nullptr;
+    }
+  }
+
+public:
+  static MxImage2D *getInstance() {
+    static MxImage2D instance;
+    return &instance;
+  }
+
+  int initialize() {
+    do {
+
+      int ret =
+          dma_buf_alloc(DMA_HEAP_DMA32_UNCACHED_PATH, DEFAULT_DMA_BUFFER_SIZE,
+                        &mDmaBufferFd1, (void **)&mDmaBuffer1);
+      if (ret < 0) {
+        ALOGE("dma_buf_alloc failed %d", ret);
+        break;
+      }
+
+      ret = dma_buf_alloc(DMA_HEAP_DMA32_UNCACHED_PATH, DEFAULT_DMA_BUFFER_SIZE,
+                          &mDmaBufferFd2, (void **)&mDmaBuffer2);
+      if (ret < 0) {
+        ALOGE("dma_buf_alloc failed %d", ret);
+        break;
+      }
+
+      mDmaBufferHandle1 =
+          importbuffer_fd(mDmaBufferFd1, DEFAULT_DMA_BUFFER_SIZE);
+      mDmaBufferHandle2 =
+          importbuffer_fd(mDmaBufferFd2, DEFAULT_DMA_BUFFER_SIZE);
+
+      if (mDmaBufferHandle1 <= 0) {
+        ALOGE("importbuffer_fd1 failed %s", imStrError());
+        break;
+      }
+      if (mDmaBufferHandle2 <= 0) {
+        ALOGE("importbuffer_fd2 failed %s", imStrError());
+        break;
+      }
+
+      return 0;
+    } while (0);
+
+    destroy();
+    return -1;
+  }
+
+  /*
+  * @brief process image to nv12
+    dst_rotate, 1,2,3  90, 180, 270
+  */
+  int process_image_nv12(void *src, int src_size, int src_width, int src_height,
+                         int sw_stride, int sh_stride, void **dst,
+                         int dst_width, int dst_height, int dst_rotate) {
+    memcpy(mDmaBuffer1, src, src_size);
+    int ret = IM_STATUS_NOERROR;
+    int new_width = 0;
+    int new_height = 0;
+    *dst = NULL;
+
+    // check need resize
+    if (src_width > dst_width || src_height > dst_height) {
+      // 等比缩放, 按照最大的比例缩放
+      ALOGD("resize 1 video frame from %dx%d to %dx%d", src_width, src_height,
+            dst_width, dst_height);
+      float scale_x = (float)src_width / dst_width;
+      float scale_y = (float)src_height / dst_height;
+
+      if (scale_x > scale_y) {
+        new_width = dst_width;
+        new_height = (int)(src_height / scale_x);
+      } else {
+        new_width = (int)(src_width / scale_y);
+        new_height = dst_height;
+      }
+
+      // 找出小于new_width的,是16倍数的最大值
+      new_width -= new_width % 16;
+      new_height -= new_height % 4;
+
+      ALOGD("resize 2 video frame %dx%d to %dx%d", src_width, src_height,
+            new_width, new_height);
+
+      rga_buffer_t srcImage = wrapbuffer_handle(
+          mDmaBufferHandle1, src_width, src_height, RK_FORMAT_YCbCr_420_SP);
+      rga_buffer_t dstImage = wrapbuffer_handle(
+          mDmaBufferHandle2, new_width, new_height, RK_FORMAT_YCbCr_420_SP);
+      ret = imcheck(srcImage, dstImage, {}, {});
+
+      if (ret < 0) {
+        ALOGE("imcheck failed %s", imStrError(ret));
+        return ret;
+      }
+      ret = imresize(srcImage, dstImage);
+
+      if (ret < 0) {
+        ALOGE("imresize failed %s", imStrError(ret));
+        return ret;
+      }
+      ALOGD("resize video frame success size=%d",
+            new_width * new_height * 3 / 2);
+    } else {
+      new_width = src_width;
+      new_height = src_height;
+      memcpy(mDmaBuffer2, src, src_size);
+      ALOGD("no need to resize video frame %dx%d to %dx%d", src_width,
+            src_height, new_width, new_height);
+    }
+
+    // fill padding
+    int topBorder = (dst_height - new_height) / 2;
+    int bottomBorder = dst_height - new_height - topBorder;
+    int leftBorder = (dst_width - new_width) / 2;
+    int rightBorder = dst_width - new_width - leftBorder;
+
+    ALOGD("pad video frame %dx%d to %dx%d top=%d bottom=%d left=%d right=%d",
+          new_width, new_height, dst_width, dst_height, topBorder, bottomBorder,
+          leftBorder, rightBorder);
+
+    rga_buffer_t srcImage2 = wrapbuffer_handle(
+        mDmaBufferHandle2, new_width, new_height, RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t dstImage2 = wrapbuffer_handle(
+        mDmaBufferHandle1, dst_width, dst_height, RK_FORMAT_YCbCr_420_SP);
+
+    ret = imcheck(srcImage2, dstImage2, {}, {});
+    if (ret < 0) {
+      ALOGE("imcheck failed %s", imStrError(ret));
+      return ret;
+    }
+
+    ret = immakeBorder(srcImage2, dstImage2, topBorder, bottomBorder,
+                       leftBorder, rightBorder, IM_BORDER_CONSTANT, 0);
+    // ret = imresize(srcImage2, dstImage2, 1.0, 1.0, IM_HAL_TRANSFORM_FLIP_H);
+    if (ret < 0) {
+      ALOGE("immakeBorder failed %s", imStrError(ret));
+      return ret;
+    }
+    ALOGD("pad video frame success size=%d", dst_width * dst_height * 3 / 2);
+
+    if (dst_rotate == 1) {
+      rga_buffer_t srcImage3 = wrapbuffer_handle(
+          mDmaBufferHandle1, dst_width, dst_height, RK_FORMAT_YCbCr_420_SP);
+      rga_buffer_t dstImage3 = wrapbuffer_handle(
+          mDmaBufferHandle2, dst_width, dst_height, RK_FORMAT_YCbCr_420_SP);
+
+      ret = imcheck(srcImage3, dstImage3, {}, {});
+      if (ret < 0) {
+        ALOGE("imcheck failed %s", imStrError(ret));
+        return ret;
+      }
+
+      ret = imrotate(srcImage3, dstImage3, IM_HAL_TRANSFORM_ROT_180);
+      if (ret < 0) {
+        ALOGE("imrotate failed %s", imStrError(ret));
+        return ret;
+      }
+      ALOGD("pad video frame success size=%d", dst_width * dst_height * 3 / 2);
+      // memcpy(dst, mDmaBuffer2, dst_width * dst_height * 3 / 2);
+      *dst = mDmaBuffer2;
+    } else {
+      // memcpy(dst, mDmaBuffer1, dst_width * dst_height * 3 / 2);
+      *dst = mDmaBuffer1;
+    }
+
+    return dst_width * dst_height * 3 / 2;
+  }
+};
 
 static void mxcam_add_video_packet(MxContext *mx, AVPacket *pkt) {
   pthread_mutex_lock(&mx->vl_mutex);
   avpriv_packet_list_put(&mx->video_list, pkt, NULL, 0);
-  mx->video_packet_cnt++;
 
   if (mx->video_packet_cnt >= 30) {
     AVPacket pkt1;
     if (avpriv_packet_list_get(&mx->video_list, &pkt1) == 0) {
       av_packet_unref(&pkt1);
     }
+  } else {
+    mx->video_packet_cnt++;
   }
   pthread_cond_signal(&mx->vl_cond);
   pthread_mutex_unlock(&mx->vl_mutex);
@@ -88,6 +512,7 @@ static AVPacket *mxcam_get_video_packet(MxContext *mx) {
   AVPacket *pkt = NULL;
 
   pthread_mutex_lock(&mx->vl_mutex);
+  ALOGD("mxcam_get_video_packet video_packet_cnt=%d", mx->video_packet_cnt);
   if (mx->video_packet_cnt == 1) {
     pkt = av_packet_clone(&mx->video_list.head->pkt);
   } else if (mx->video_packet_cnt > 1) {
@@ -99,8 +524,8 @@ static AVPacket *mxcam_get_video_packet(MxContext *mx) {
   return pkt;
 }
 
-class MxCamClient : public boost::enable_shared_from_this<MxCamClient>,
-                    private boost::noncopyable {
+class MxCamSockClient : public boost::enable_shared_from_this<MxCamSockClient>,
+                        private boost::noncopyable {
 private:
   boost::asio::io_context &mIoContext;
   boost::asio::ip::tcp::socket mClientSocket;
@@ -116,14 +541,21 @@ private:
   int mReplyBufPos = 0;
 
 public:
-  MxCamClient(MxContext *mx, boost::asio::io_context &ioc)
+  MxCamSockClient(MxContext *mx, boost::asio::io_context &ioc)
       : mMxCtx(mx), mIoContext(ioc), mClientSocket(ioc), mTimer(ioc) {
     mLastActionTime = std::chrono::steady_clock::now();
     mReplyBuf = (char *)malloc(32 * 1024 * 1024);
     mReplyBufSize = 32 * 1024 * 1024;
+
+    int snd_buf_size = 2 * 1024 * 1024;
+    int recv_buf_size = 64 * 1024;
+    mClientSocket.set_option(
+        boost::asio::socket_base::send_buffer_size(snd_buf_size));
+    mClientSocket.set_option(
+        boost::asio::socket_base::receive_buffer_size(recv_buf_size));
   }
 
-  ~MxCamClient() {
+  ~MxCamSockClient() {
     if (mReplyBuf) {
       free(mReplyBuf);
       mReplyBuf = NULL;
@@ -151,14 +583,14 @@ private:
   void start_timer() {
     auto self(shared_from_this());
     mTimer.expires_after(std::chrono::seconds(5));
-    mTimer.async_wait(boost::bind(&MxCamClient::on_timer, self,
+    mTimer.async_wait(boost::bind(&MxCamSockClient::on_timer, self,
                                   boost::asio::placeholders::error));
   }
 
   void start_read() {
     mClientSocket.async_read_some(
         boost::asio::buffer(mRecvBuf, MAX_CMD_SIZE),
-        boost::bind(&MxCamClient::handle_read, shared_from_this(),
+        boost::bind(&MxCamSockClient::handle_read, shared_from_this(),
                     boost::asio::placeholders::error,
                     boost::asio::placeholders::bytes_transferred));
   }
@@ -243,6 +675,14 @@ private:
     }
 
     if (strcmp(query_name, _cmd_start) == 0) {
+      snprintf(mReplyBuf, mReplyBufSize - 1,
+               "dim=%dx%d pix=%d"
+               " fps=%d bitrate=%d",
+               mMxCtx->video_width, mMxCtx->video_height, mMxCtx->video_format,
+               mMxCtx->video_fps, mMxCtx->video_bitrate);
+      *reply = mReplyBuf;
+      *reply_size = strlen(mReplyBuf);
+      ALOGD("MXCamEnc: start video stream %s", mReplyBuf);
       return 0;
     } else if (strcmp(query_name, _cmd_stop) == 0) {
       return 0;
@@ -292,14 +732,14 @@ private:
   }
 };
 
-class MxCamServer {
+class MxCamSockServer {
 private:
   MxContext *mMxCtx;
   boost::asio::io_context mIoContext;
   boost::asio::ip::tcp::acceptor mAcceptor;
 
 public:
-  MxCamServer(MxContext *mx, const char *listen_ip, int port)
+  MxCamSockServer(MxContext *mx, const char *listen_ip, int port)
       : mMxCtx(mx),
         mAcceptor(mIoContext,
                   boost::asio::ip::tcp::endpoint(
@@ -313,7 +753,8 @@ public:
 
 private:
   void start_accept() {
-    boost::shared_ptr<MxCamClient> client(new MxCamClient(mMxCtx, mIoContext));
+    boost::shared_ptr<MxCamSockClient> client(
+        new MxCamSockClient(mMxCtx, mIoContext));
     mAcceptor.async_accept(
         client->get_socket(),
         [this, client](const boost::system::error_code &error) {
@@ -328,22 +769,308 @@ private:
   }
 };
 
-static void *io_threadfunc(void *arg) {
+/*
+* https://man7.org/linux/man-pages/man3/mkfifo.3.html
+  https://man7.org/linux/man-pages/man7/fifo.7.html
+  https://man7.org/linux/man-pages/man7/pipe.7.html
+
+       If all file descriptors referring to the write end of a pipe have
+       been closed, then an attempt to read(2) from the pipe will see
+       end-of-file (read(2) will return 0).  If all file descriptors
+       referring to the read end of a pipe have been closed, then a
+       write(2) will cause a SIGPIPE signal to be generated for the
+       calling process.  If the calling process is ignoring this signal,
+       then write(2) fails with the error EPIPE.  An application that
+       uses pipe(2) and fork(2) should use suitable close(2) calls to
+       close unnecessary duplicate file descriptors; this ensures that
+       end-of-file and SIGPIPE/EPIPE are delivered when appropriate.
+*/
+class MxCamPipe {
+private:
+  std::string mRdFile; // fifo to read
+  std::string mWtFile; // fifo to write
+  int mRdFd;
+  int mWtFd;
+
+public:
+  MxCamPipe(const char *rd_file, const char *wt_file)
+      : mRdFile(rd_file), mWtFile(wt_file), mRdFd(-1), mWtFd(-1) {}
+
+  ~MxCamPipe() {}
+
+  int initialize() {
+    if (access(mRdFile.c_str(), F_OK)) {
+      mkfifo(mRdFile.c_str(), 0666);
+    }
+
+    if (access(mWtFile.c_str(), F_OK)) {
+      mkfifo(mWtFile.c_str(), 0666);
+    }
+
+    chmod(mRdFile.c_str(), 0666);
+    chmod(mWtFile.c_str(), 0666);
+
+    auto rd_fd = open(mRdFile.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (rd_fd < 0) {
+      ALOGE("MXCamEnc: open pipe(%s) failed %s", mRdFile.c_str(),
+            strerror(errno));
+      return false;
+    }
+
+    auto wt_fd = open(mWtFile.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
+    if (wt_fd < 0) {
+      ALOGE("MXCamEnc: open pipe(%s) failed %s", mWtFile.c_str(),
+            strerror(errno));
+      close(rd_fd);
+      return false;
+    }
+    mRdFd = rd_fd;
+    mWtFd = wt_fd;
+
+    int ret = fcntl(mWtFd, F_SETPIPE_SZ, 1024 * 1024);
+    if (ret == -1) {
+      ALOGE("set pipe size failed %s", strerror(errno));
+    } else {
+      ALOGD("set pipe size success");
+    }
+
+    ALOGD("initialize pipe success ctrl=%s", mRdFile.c_str());
+    ALOGD("initialize pipe success reply=%s", mWtFile.c_str());
+
+    signal(SIGPIPE, [](int sig) { ALOGE("SIGPIPE"); });
+
+    return 0;
+  }
+
+  void stop() {
+    if (mRdFd >= 0) {
+      close(mRdFd);
+      mRdFd = -1;
+    }
+    if (mWtFd >= 0) {
+      close(mWtFd);
+      mWtFd = -1;
+    }
+  }
+
+  int run_once(int timeout_ms) {
+    char cmd[1024] = {0};
+    int ret = pipe_read_string(mRdFd, cmd, sizeof(cmd), -1);
+    if (ret <= 0) {
+      ALOGE("read command failed %d", ret);
+      return -1;
+    }
+
+    ALOGD("pipe_read_string %d bytes from client: %s\n", ret, cmd);
+    char *reply = NULL;
+    int reply_size = 0;
+    ret = handle_command(cmd, &reply, &reply_size);
+    if (ret < 0) {
+      ALOGE("handle command failed %d", ret);
+      return -1;
+    }
+
+    static char reply_header[16] = {0};
+    if (reply_size > 0) {
+      snprintf(reply_header, sizeof(reply_header), "%08xok:", reply_size + 3);
+    } else {
+      snprintf(reply_header, sizeof(reply_header), "00000003ok\0");
+    }
+
+    ret = pipe_write_data(mWtFd, reply_header, 11, timeout_ms);
+    if (ret < 0 || ret != 11) {
+      ALOGE("write header(11 bytes) failed %d", ret);
+      return -1;
+    }
+    if (reply_size > 0) {
+      ret = pipe_write_data(mWtFd, reply, reply_size, timeout_ms);
+      if (ret < 0 || ret != reply_size) {
+        ALOGE("write data(%d bytes) failed %d", reply_size, ret);
+        return -1;
+      }
+    }
+    ALOGD("MXCamEnc: write %d bytes to client: %s\n", ret, cmd);
+    return 0;
+  }
+
+private:
+  virtual int handle_command_start(const char *params, char **reply,
+                                   int *reply_size) {
+    return 0;
+  }
+  virtual int handle_command_stop(const char *params, char **reply,
+                                  int *reply_size) {
+    return 0;
+  }
+  virtual int handle_command_frame(const char *params, char **reply,
+                                   int *reply_size) {
+    return 0;
+  }
+
+  int handle_command(const char *command, char **reply, int *reply_size) {
+    char query_name[64] = {0};
+    const char *query_param = NULL;
+
+    *reply = NULL;
+    *reply_size = 0;
+
+    if (_parse_query((const char *)command, query_name, sizeof(query_name),
+                     &query_param)) {
+      ALOGE("parse query failed");
+      return -1;
+    }
+    if (strncmp(query_name, "start", 5) == 0) {
+      return handle_command_start(query_param, reply, reply_size);
+    } else if (strncmp(query_name, "stop", 4) == 0) {
+      return handle_command_stop(query_param, reply, reply_size);
+    } else if (strncmp(query_name, "frame", 5) == 0) {
+      return handle_command_frame(query_param, reply, reply_size);
+    }
+    return -1;
+  }
+};
+
+class MxCamVideoPipe : public MxCamPipe {
+private:
+  MxContext *mMxCtx;
+  char *mReplyBuf = NULL;
+  int mReplyBufSize = 0;
+  int mReplyBufPos = 0;
+
+public:
+  MxCamVideoPipe(MxContext *mx, const char *rd_file, const char *wt_file)
+      : MxCamPipe(rd_file, wt_file), mMxCtx(mx) {
+    mReplyBuf = (char *)malloc(32 * 1024 * 1024);
+    mReplyBufSize = 32 * 1024 * 1024;
+    mReplyBufPos = 0;
+  }
+
+  ~MxCamVideoPipe() {}
+
+  virtual int handle_command_start(const char *params, char **reply,
+                                   int *reply_size) {
+    snprintf(mReplyBuf, mReplyBufSize - 1, "dim=%dx%d pix=%d fps=%d bitrate=%d",
+             mMxCtx->video_width, mMxCtx->video_height, mMxCtx->video_format,
+             mMxCtx->video_fps, mMxCtx->video_bitrate);
+    *reply = mReplyBuf;
+    *reply_size = strlen(mReplyBuf);
+    ALOGD("handle_command_start response:%d bytes %s", strlen(mReplyBuf),
+          mReplyBuf);
+    return 0;
+  }
+  virtual int handle_command_frame(const char *params, char **reply,
+                                   int *reply_size) {
+
+    int video_size = 0, format = 0, width = 0, height = 0, rotate = 0;
+
+    int x = sscanf(params, "video=%d format=%d dim=%dx%d rotate=%d",
+                   &video_size, &format, &width, &height, &rotate);
+    if (x != 5) {
+      ALOGE("parse query_param failed");
+      *reply = NULL;
+      *reply_size = 0;
+      return -1;
+    }
+
+    AVPacket *packet = mxcam_get_video_packet(mMxCtx);
+    if (!packet) {
+      ALOGE("no packet exist. waitting");
+      return 0;
+    }
+    AVFrame *frame = (AVFrame *)packet->data;
+    if (!frame) {
+      ALOGE("get frame from packet failed");
+      av_packet_free(&packet);
+      return -1;
+    }
+
+    int frameSize = av_image_get_buffer_size((AVPixelFormat)frame->format,
+                                             frame->width, frame->height, 1);
+    int frame_width = frame->width;
+    int frame_height = frame->height;
+
+    if (frameSize > mReplyBufSize) {
+      if (mReplyBuf) {
+        free(mReplyBuf);
+      }
+      mReplyBuf = (char *)malloc(frameSize);
+      mReplyBufSize = frameSize;
+    }
+
+    int bytesCopied = av_image_copy_to_buffer(
+        (uint8_t *)mReplyBuf, frameSize, frame->data, frame->linesize,
+        (AVPixelFormat)frame->format, frame->width, frame->height, 1);
+
+    av_packet_free(&packet);
+
+    if (bytesCopied != frameSize) {
+      ALOGE("MXCamEnc: copy video frame failed");
+      return -1;
+    }
+
+    if (MxImage2D::getInstance()->process_image_nv12(
+            mReplyBuf, frameSize, frame_width, frame_height, frame_width,
+            frame_height, (void **)reply, width, height,
+            rotate) != video_size) {
+      ALOGE("process image failed");
+      return -1;
+    }
+
+    *reply_size = video_size;
+
+    return 0;
+  }
+
+  void stop() {
+    if (mReplyBuf) {
+      free(mReplyBuf);
+      mReplyBuf = NULL;
+    }
+    MxCamPipe::stop();
+  }
+};
+
+static void *videopipe_threadfunc(void *arg) {
   MxContext *mx = (MxContext *)arg;
+  int phone = mx->phone;
+  char rd_file[256];
+  char wt_file[256];
 
-  MxCamServer *server = new MxCamServer(mx, mx->listen_ip, mx->listen_port);
-  mx->mx_server = (void *)server;
-  server->run();
+  snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone);
+  snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone);
 
+  ALOGD("MXCamEnc: video pipe rd_file=%s wt_file=%s", rd_file, wt_file);
+  MxCamVideoPipe *pipe = new MxCamVideoPipe(mx, rd_file, wt_file);
+  if (pipe->initialize() < 0) {
+    ALOGE("MXCamEnc: video pipe initialize failed");
+    delete pipe;
+    return NULL;
+  }
+  mx->mx_video_pipeserver = pipe;
+  ALOGD("MXCamEnc: video pipe initialize success");
+
+  while (!mx->is_stop) {
+    int ret = pipe->run_once(5000);
+    if (ret < 0) {
+      ALOGE("MXCamEnc: video pipe run_once failed");
+      usleep(500000);
+    }
+  }
+
+  pipe->stop();
+  delete pipe;
+  ALOGD("MXCamEnc: video pipe thread exit");
   return 0;
 }
 
-int mxcam_start_server_socket(MxContext *mx) {
-
-  ALOGD("MXCamEnc: mxcam_start_server_socket=%d", mx->phone);
-  pthread_create(&mx->io_worker, NULL, io_threadfunc, mx);
-  ALOGD("MXCamEnc: video_io_threadfunc create %d\n", mx->phone);
-
+int mxcam_start_server(MxContext *mx) {
+  ALOGD("MXCamEnc: mxcam_start_server=%d", mx->phone);
+  if (MxImage2D::getInstance()->initialize() != 0) {
+    ALOGE("MxImage2D initialize failed, check DMA permission/memory enought?");
+    return -1;
+  }
+  pthread_create(&mx->io_worker, NULL, videopipe_threadfunc, mx);
+  ALOGD("MXCamEnc: videopipe_threadfunc create %d\n", mx->phone);
   return 0;
 }
 
@@ -356,6 +1083,10 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
+      const char *fmt =
+          av_get_pix_fmt_name((AVPixelFormat)((AVFrame *)pkt->data)->format);
+      ALOGD("MXCamEnc: add video packet %d, fmt:%s", pkt->size,
+            fmt ? fmt : "unknown");
       mxcam_add_video_packet(mx, pkt);
     }
   } else {
@@ -365,13 +1096,8 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   return 0;
 }
 
-int mxcam_top_server(MxContext *mx) {
-  if (mx->mx_server) {
-    MxCamServer *server = (MxCamServer *)mx->mx_server;
-    server->stop();
-    delete server;
-    mx->mx_server = NULL;
-  }
+int mxcam_stop_server(MxContext *mx) {
+  mx->is_stop = 1;
   return 0;
 }
 

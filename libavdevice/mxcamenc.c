@@ -28,11 +28,6 @@ static int write_header(AVFormatContext *s1) {
 
   ALOGD("MXCamEnc: write_header url=%s,phone=%d\n", s1->url, mx->phone);
 
-  if (mxcam_start_server_socket(mx) < 0) {
-    ALOGE("MXCamEnc: open fifo failed\n");
-    return AVERROR(EIO);
-  }
-
   mx->audio_stream_idx = -1;
   mx->video_stream_idx = -1;
 
@@ -43,6 +38,18 @@ static int write_header(AVFormatContext *s1) {
       mx->audio_stream_idx = i;
     } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       mx->video_stream_idx = i;
+      mx->video_width = st->codecpar->width;
+      mx->video_height = st->codecpar->height;
+      mx->video_format = st->codecpar->format;
+      mx->video_fps = av_q2d(st->avg_frame_rate);
+      mx->video_bitrate = st->codecpar->bit_rate;
+      ALOGD("MXCamEnc: video stream %d, width=%d, height=%d\n", i,
+            mx->video_width, mx->video_height);
+      if (st->codecpar->codec_id != AV_CODEC_ID_WRAPPED_AVFRAME) {
+        ALOGE("MXCamEnc: video codec %d not supported\n",
+              st->codecpar->codec_id);
+        return AVERROR(EIO);
+      }
     }
   }
 
@@ -52,6 +59,11 @@ static int write_header(AVFormatContext *s1) {
 
   if (mx->video_stream_idx < 0) {
     ALOGE("MXCamEnc: no video stream present\n");
+  }
+
+  if (mxcam_start_server(mx) < 0) {
+    ALOGE("MXCamEnc: open fifo failed\n");
+    return AVERROR(EIO);
   }
 
   return 0;
@@ -64,7 +76,7 @@ static int write_packet(AVFormatContext *s1, AVPacket *pkt) {
 static int write_trailer(AVFormatContext *s1) {
   ALOGD("MXCamEnc: write_trailer\n");
   MxContext *mx = s1->priv_data;
-  return mxcam_top_server(mx);
+  return mxcam_stop_server(mx);
 }
 
 #define OFFSET(x) offsetof(MxContext, x)

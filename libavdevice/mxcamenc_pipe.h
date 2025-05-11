@@ -3,12 +3,25 @@
 
 #include "mxcamenc_common.h"
 
+#define VCTRL_FILE                                                             \
+  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
+  "camera.ctl"
+#define VREPLY_FILE                                                            \
+  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
+  "camera.reply"
+#define ACRTL_FILE                                                             \
+  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
+  "audio.ctl"
+#define AREPLY_FILE                                                            \
+  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
+  "audio.reply"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-int mxcam_start_server_socket(MxContext *mx);
+int mxcam_start_server(MxContext *mx);
 int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt);
-int mxcam_top_server(MxContext *mx);
+int mxcam_stop_server(MxContext *mx);
 
 #ifdef __cplusplus
 }

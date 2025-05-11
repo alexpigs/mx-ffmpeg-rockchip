@@ -1,5 +1,9 @@
 
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --target-os=linux --arch=aarch64  --extra-cflags="-D__USE_GNU" --extra-ldflags="-ldl"
+debug
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g"
+
+releae
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
 
 
 ./ffmpeg -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -vsync 2 -f null -
@@ -7,7 +11,7 @@
 
 
 
-./ffmpeg -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12" -vsync 2 -f mxcam -
+./ffmpeg -re -loglevel warning -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i /mnt/data/v2c/videos/test2.mp4 -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -vsync 2 -f mxcam -phone 1 -
 
 
 ./ffmpeg -loglevel info  -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "format=nv12" -vsync 2 -f mxcam -

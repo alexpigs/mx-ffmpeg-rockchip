@@ -88,6 +88,14 @@
         "typeindex": "cpp",
         "typeinfo": "cpp",
         "variant": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "rkrga_common.h": "c",
+        "im2d.h": "c",
+        "im2d_common.h": "c",
+        "im2d_task.h": "c",
+        "im2d_version.h": "c",
+        "im2d_type.h": "c",
+        "im2d_mpi.h": "c",
+        "rgaapi.h": "c"
     }
 }
