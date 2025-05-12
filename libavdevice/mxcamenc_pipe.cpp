@@ -106,7 +106,7 @@ static inline int pipe_read_string(int fd, char *buffer, int size,
     }
 
     if (fds[0].revents & (POLLHUP)) {
-      ALOGE("poll POLLHUP, failed");
+      // ALOGE("poll POLLHUP, failed");
       return -1;
     } else if (fds[0].revents & POLLIN) {
       /*
@@ -115,8 +115,9 @@ static inline int pipe_read_string(int fd, char *buffer, int size,
        end-of-file (read(2) will return 0).
        */
       while ((ret = read(fd, buffer + bytes_read, size - bytes_read)) > 0) {
-        ALOGD("pipe_read_data ret=%d, bytes_read=%d, size=%d", ret, bytes_read,
-              size);
+        // ALOGD("pipe_read_string ret=%d, bytes_read=%d, size=%d", ret,
+        // bytes_read,
+        //       size);
         if (bytes_read + ret >= size) {
           break;
         }
@@ -250,7 +251,9 @@ static inline int pipe_write_data(int fd, const char *buffer, int size,
       break;
     }
 
+    ALOGD("try poll timeout=%d", timeout_ms);
     ret = poll(fds, 1, timeout_ms);
+    ALOGD("poll=%d", ret);
 
     if (ret == 0) {
       continue;
@@ -269,23 +272,26 @@ static inline int pipe_write_data(int fd, const char *buffer, int size,
        the calling process.  If the calling process is ignoring this signal,
        then write(2) fails with the error EPIPE.
        */
-      ret = write(fd, buffer + bytes_written, size - bytes_written);
-      if (ret == 0 || ret == -1) {
-        if (errno == EAGAIN) {
-          continue;
-        } else if (errno == EPIPE) {
-          ALOGE("noreader, write error %d, err=%s", ret, strerror(errno));
-          return -1;
-        } else {
-          ALOGE("write error %d, err=%s", ret, strerror(errno));
-          return -1;
+      while ((ret = write(fd, (char *)buffer + bytes_written,
+                          size - bytes_written)) > 0) {
+        ALOGD("pipe_write_data ret=%d, bytes_written=%d, size=%d", ret,
+              bytes_written, size);
+        bytes_written += ret;
+        if (bytes_written == size) {
+          return size;
         }
       }
 
-      bytes_written += ret;
-
-      if (bytes_written == size) {
-        return size;
+      ALOGD("pipe_write_data ret=%d,  bytes_written=%d, size=%d, err=%d:%s",
+            ret, bytes_written, size, errno, strerror(errno));
+      if (errno == EAGAIN) {
+        continue;
+      } else if (errno == EPIPE) {
+        ALOGE("noreader, write error %d, err=%s", ret, strerror(errno));
+        return -1;
+      } else {
+        ALOGE("write error %d, err=%s", ret, strerror(errno));
+        return -1;
       }
     } else {
       ALOGE("unknown events %08x", fds[0].revents);
@@ -466,7 +472,7 @@ public:
       ALOGE("immakeBorder failed %s", imStrError(ret));
       return ret;
     }
-    ALOGD("pad video frame success size=%d", dst_width * dst_height * 3 / 2);
+    ALOGD("immakeBorder success size=%d", dst_width * dst_height * 3 / 2);
 
     if (dst_rotate == 1) {
       rga_buffer_t srcImage3 = wrapbuffer_handle(
@@ -485,7 +491,7 @@ public:
         ALOGE("imrotate failed %s", imStrError(ret));
         return ret;
       }
-      ALOGD("pad video frame success size=%d", dst_width * dst_height * 3 / 2);
+      ALOGD("imrotate success size=%d", dst_width * dst_height * 3 / 2);
       // memcpy(dst, mDmaBuffer2, dst_width * dst_height * 3 / 2);
       *dst = mDmaBuffer2;
     } else {
@@ -517,12 +523,15 @@ private:
 public:
   void addVideoFrame(AVFrame *frame) {
     std::unique_lock<std::mutex> lock(mVideoMutex);
+    mVideoFrameCache.push_back(frame);
+    // ALOGD("mxcam add video frame, pts=%d", frame->pts);
     if (mVideoFrameCache.size() >= MAX_VIDEO_FRAME_CACHE) {
       AVFrame *old_frame = mVideoFrameCache.front();
       mVideoFrameCache.pop_front();
+      // ALOGD("mxcam video frame cache full, free oldest frame pts=%d",
+      //       old_frame->pts);
       av_frame_free(&old_frame);
     }
-    mVideoFrameCache.push_back(frame);
     mVideoCond.notify_one();
   }
 
@@ -532,11 +541,13 @@ public:
       return NULL;
     } else if (mVideoFrameCache.size() == 1) {
       // 只有一个元素, 复制返回
+      // ALOGD("mxcam get video frame, only one frame");
       AVFrame *frame = mVideoFrameCache.front();
       return av_frame_clone(frame);
     }
     AVFrame *frame = mVideoFrameCache.front();
     mVideoFrameCache.pop_front();
+    // ALOGD("mxcam get video frame, pts=%d", frame->pts);
     return frame;
   }
 };
@@ -848,25 +859,24 @@ public:
   int initialize() {
     if (access(mRdFile.c_str(), F_OK)) {
       mkfifo(mRdFile.c_str(), 0666);
+      chmod(mRdFile.c_str(), 0666);
     }
 
     if (access(mWtFile.c_str(), F_OK)) {
       mkfifo(mWtFile.c_str(), 0666);
+      chmod(mWtFile.c_str(), 0666);
     }
-
-    chmod(mRdFile.c_str(), 0666);
-    chmod(mWtFile.c_str(), 0666);
 
     auto rd_fd = open(mRdFile.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (rd_fd < 0) {
-      ALOGE("MXCamEnc: open pipe(%s) failed %s", mRdFile.c_str(),
+      ALOGE("MxCamPipe: open pipe(%s) failed %s", mRdFile.c_str(),
             strerror(errno));
       return false;
     }
 
     auto wt_fd = open(mWtFile.c_str(), O_RDWR | O_CLOEXEC | O_NONBLOCK);
     if (wt_fd < 0) {
-      ALOGE("MXCamEnc: open pipe(%s) failed %s", mWtFile.c_str(),
+      ALOGE("MxCamPipe: open pipe(%s) failed %s", mWtFile.c_str(),
             strerror(errno));
       close(rd_fd);
       return false;
@@ -884,7 +894,7 @@ public:
     ALOGD("initialize pipe success ctrl=%s", mRdFile.c_str());
     ALOGD("initialize pipe success reply=%s", mWtFile.c_str());
 
-    signal(SIGPIPE, [](int sig) { ALOGE("SIGPIPE"); });
+    // signal(SIGPIPE, [](int sig) { ALOGE("SIGPIPE"); });
 
     return 0;
   }
@@ -900,6 +910,11 @@ public:
     }
   }
 
+  int reset_pipe() {
+    stop();
+    return initialize();
+  }
+
   int run_once(int timeout_ms) {
     char cmd[1024] = {0};
     int ret = pipe_read_string(mRdFd, cmd, sizeof(cmd), -1);
@@ -908,7 +923,7 @@ public:
       return -1;
     }
 
-    ALOGD("pipe_read_string %d bytes from client: %s\n", ret, cmd);
+    ALOGD("run_once command: %s", cmd);
     char *reply = NULL;
     int reply_size = 0;
     ret = handle_command(cmd, &reply, &reply_size);
@@ -924,19 +939,22 @@ public:
       snprintf(reply_header, sizeof(reply_header), "00000003ok\0");
     }
 
+    ALOGD("run_once try reply_header: %s", reply_header);
+
     ret = pipe_write_data(mWtFd, reply_header, 11, timeout_ms);
     if (ret < 0 || ret != 11) {
       ALOGE("write header(11 bytes) failed %d", ret);
       return -1;
     }
     if (reply_size > 0) {
+      ALOGD("run_once try reply data: %d bytes", reply_size);
       ret = pipe_write_data(mWtFd, reply, reply_size, timeout_ms);
       if (ret < 0 || ret != reply_size) {
         ALOGE("write data(%d bytes) failed %d", reply_size, ret);
         return -1;
       }
     }
-    ALOGD("MXCamEnc: write %d bytes to client: %s\n", ret, cmd);
+    ALOGD("run_once ok");
     return 0;
   }
 
@@ -1073,28 +1091,15 @@ public:
 
 static void *videopipe_threadfunc(void *arg) {
   MxContext *mx = (MxContext *)arg;
-  int phone = mx->phone;
-  char rd_file[256];
-  char wt_file[256];
-
-  snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone);
-  snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone);
-
-  ALOGD("MXCamEnc: video pipe rd_file=%s wt_file=%s", rd_file, wt_file);
-  MxCamVideoPipe *pipe = new MxCamVideoPipe(mx, rd_file, wt_file);
-  if (pipe->initialize() < 0) {
-    ALOGE("MXCamEnc: video pipe initialize failed");
-    delete pipe;
-    return NULL;
-  }
-  mx->mx_video_pipeserver = pipe;
-  ALOGD("MXCamEnc: video pipe initialize success");
+  MxCamVideoPipe *pipe = (MxCamVideoPipe *)mx->mx_video_pipeserver;
 
   while (!mx->is_stop) {
-    int ret = pipe->run_once(5000);
+    int ret = pipe->run_once(200);
     if (ret < 0) {
-      ALOGE("MXCamEnc: video pipe run_once failed");
-      usleep(500000);
+      // ALOGE("MXCamEnc: video pipe run_once failed");
+
+      usleep(10000);
+      pipe->reset_pipe();
     }
   }
 
@@ -1104,14 +1109,174 @@ static void *videopipe_threadfunc(void *arg) {
   return 0;
 }
 
+#define AUDIO_BYTES_PER_SECOND (44100 * 2 * 2)
+#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 10)
+
+class MxCamAudioPipe : public MxCamPipe {
+private:
+  MxContext *mMxCtx;
+
+  std::mutex mBufferMutex;
+  std::condition_variable mBufferCond;
+  std::mutex mBufferCondMutext;
+  AVFifo *mAudioFifo = NULL;
+
+  char *mReplyBuf = NULL;
+  int mReplyBufSize = 0;
+
+public:
+  MxCamAudioPipe(MxContext *mx, const char *rd_file, const char *wt_file)
+      : MxCamPipe(rd_file, wt_file), mMxCtx(mx) {
+    mAudioFifo = av_fifo_alloc2(AUDIO_CACHE_SIZE, 1, AV_FIFO_FLAG_AUTO_GROW);
+  }
+
+  ~MxCamAudioPipe() { stop(); }
+
+  virtual int handle_command_frame(const char *params, char **reply,
+                                   int *reply_size) {
+
+    int audio_size = 0, format = 0, sample_rate_hz = 0, ch = 0, tt = 0;
+
+    int x = sscanf(params, "audio=%zu format=%d hz=%d ch=%d time=%d",
+                   &audio_size, &format, &sample_rate_hz, &ch, &tt);
+    if (x != 5) {
+      ALOGE("parse query_param failed");
+      *reply = NULL;
+      *reply_size = 0;
+      return -1;
+    }
+    ALOGD("audio queryFrame: audio size=%d format=%d hz=%d ch=%d time=%d",
+          audio_size, format, sample_rate_hz, ch, tt);
+
+    // {
+    //   std::unique_lock<std::mutex> __lockxx(mBufferCondMutext);
+    //   while (!mBufferCond.wait_for(
+    //       __lockxx, std::chrono::milliseconds(100),
+    //       [this, audio_size] { return mBufferPos >= audio_size; })) {
+    //     ALOGD("audio wait for data %d/%d", mBufferPos, audio_size);
+    //   }
+    // }
+
+    std::unique_lock<std::mutex> lock(mBufferMutex);
+
+    int cache_size = av_fifo_can_read(mAudioFifo);
+    ALOGD("audio queryFrame: audio size=%d/%d format=%d hz=%d ch=%d "
+          "time=%d",
+          audio_size, cache_size, format, sample_rate_hz, ch, tt);
+
+    if (cache_size < audio_size) {
+      ALOGE("audio buffer not enough, need %d bytes, but only %d bytes",
+            audio_size, cache_size);
+      return -1;
+    }
+
+    if (mReplyBufSize < audio_size) {
+      if (mReplyBuf) {
+        free(mReplyBuf);
+      }
+      mReplyBuf = (char *)malloc(audio_size);
+      mReplyBufSize = audio_size;
+    }
+
+    av_fifo_read(mAudioFifo, mReplyBuf, audio_size);
+
+    // av_fifo_generic_read(mAudioFifo, mReplyBuf, audio_size, NULL);
+
+    *reply = mReplyBuf;
+    *reply_size = audio_size;
+    return 0;
+  }
+
+  void stop() {
+    if (mAudioFifo) {
+      av_fifo_freep2(&mAudioFifo);
+      mAudioFifo = NULL;
+    }
+    MxCamPipe::stop();
+  }
+
+  void add_audio_frame(AVCodecParameters *par, const uint8_t *buf, int size) {
+
+    std::unique_lock<std::mutex> lock(mBufferMutex);
+    int ret = 0;
+    int space = av_fifo_can_write(mAudioFifo);
+    if (space < size) {
+      // ret = av_fifo_grow2(mAudioFifo, size - space);
+      // if (ret < 0) {
+      //   ALOGE("audio fifo grow failed %d", ret);
+      //   return;
+      // }
+      av_fifo_drain2(mAudioFifo, size - space);
+      ALOGE("av_fifo_drain2 %d bytes", size - space);
+    }
+
+    ret = av_fifo_write(mAudioFifo, buf, size);
+    if (ret < 0) {
+      ALOGE("audio fifo write failed %d", ret);
+      return;
+    }
+    mBufferCond.notify_one();
+    int cache_size = av_fifo_can_read(mAudioFifo);
+    ALOGD("audo frame total cache:%d", cache_size);
+  }
+};
+
+static void *audiopipe_threadfunc(void *arg) {
+  MxContext *mx = (MxContext *)arg;
+
+  MxCamAudioPipe *pipe = (MxCamAudioPipe *)mx->mx_audio_pipeserver;
+  while (!mx->is_stop) {
+    int ret = pipe->run_once(200);
+    if (ret < 0) {
+      usleep(10000);
+      pipe->reset_pipe();
+    }
+  }
+
+  pipe->stop();
+  delete pipe;
+  ALOGD("MxCamAudioPipe thread exit");
+  return 0;
+}
+
 int mxcam_start_server(MxContext *mx) {
   ALOGD("MXCamEnc: mxcam_start_server=%d", mx->phone);
   if (MxImage2D::getInstance()->initialize() != 0) {
     ALOGE("MxImage2D initialize failed, check DMA permission/memory enought?");
     return -1;
   }
-  pthread_create(&mx->io_worker, NULL, videopipe_threadfunc, mx);
+  int phone = mx->phone;
+  char rd_file[256];
+  char wt_file[256];
+
+  snprintf(rd_file, sizeof(rd_file), ACRTL_FILE, phone);
+  snprintf(wt_file, sizeof(wt_file), AREPLY_FILE, phone);
+
+  ALOGD("audiopipe_threadfunc rd_file=%s wt_file=%s", rd_file, wt_file);
+  MxCamAudioPipe *pipe = new MxCamAudioPipe(mx, rd_file, wt_file);
+  if (pipe->initialize() < 0) {
+    ALOGE("MxCamAudioPipe initialize failed");
+    delete pipe;
+    return -1;
+  }
+  mx->mx_audio_pipeserver = pipe;
+  pthread_create(&mx->audio_io_worker, NULL, audiopipe_threadfunc, mx);
+  ALOGD("audiopipe_threadfunc create %d\n", mx->phone);
+
+  snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone);
+  snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone);
+
+  ALOGD("videopipe_threadfunc rd_file=%s wt_file=%s", rd_file, wt_file);
+  MxCamVideoPipe *vpipe = new MxCamVideoPipe(mx, rd_file, wt_file);
+  if (vpipe->initialize() < 0) {
+    ALOGE("MxCamAudioPipe initialize failed");
+    delete vpipe;
+    return -1;
+  }
+  mx->mx_video_pipeserver = vpipe;
+  pthread_create(&mx->video_io_worker, NULL, videopipe_threadfunc, mx);
   ALOGD("MXCamEnc: videopipe_threadfunc create %d\n", mx->phone);
+
   return 0;
 }
 
@@ -1121,21 +1286,20 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
 
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
+    AVCodecParameters *par = s1->streams[pkt->stream_index]->codecpar;
+    MxCamAudioPipe *pipe = (MxCamAudioPipe *)mx->mx_audio_pipeserver;
+    pipe->add_audio_frame(par, pkt->data, pkt->size);
+    // get bytes in 1 second
+
+    return 0;
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
-      // const char *fmt =
-      //     av_get_pix_fmt_name((AVPixelFormat)((AVFrame *)pkt->data)->format);
-      // ALOGD("MXCamEnc: add video packet %d, fmt:%s", pkt->size,
-      //       fmt ? fmt : "unknown");
-      // mxcam_add_video_packet(mx, pkt);
       return mxcam_add_video_packet(mx, (AVFrame *)pkt->data);
     }
-  } else {
-    ALOGE("MXCamEnc: unknown stream index %d\n", pkt->stream_index);
-    return AVERROR(EINVAL);
   }
-  return 0;
+  ALOGE("MXCamEnc: unknown stream index %d\n", pkt->stream_index);
+  return AVERROR(EINVAL);
 }
 
 int mxcam_stop_server(MxContext *mx) {

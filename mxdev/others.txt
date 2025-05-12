@@ -1,9 +1,9 @@
 
 debug
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g"
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo
 
 releae
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-muxer=fifo
 
 
 ./ffmpeg -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -vsync 2 -f null -

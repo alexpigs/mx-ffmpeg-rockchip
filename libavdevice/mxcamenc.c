@@ -34,8 +34,13 @@ static int write_header(AVFormatContext *s1) {
   for (int i = 0; i < s1->nb_streams; i++) {
     AVStream *st = s1->streams[i];
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-
       mx->audio_stream_idx = i;
+      mx->audio_sample_rate = st->codecpar->sample_rate;
+      mx->audio_channels = st->codecpar->channels;
+      mx->audio_format = st->codecpar->format;
+      mx->audio_bitrate = st->codecpar->bit_rate;
+      ALOGD("MXCamEnc: audio stream %d, sample_rate=%d, channels=%d\n", i,
+            mx->audio_sample_rate, mx->audio_channels);
     } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
       mx->video_stream_idx = i;
       mx->video_width = st->codecpar->width;

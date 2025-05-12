@@ -22,6 +22,8 @@ extern "C" {
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/thread.h"
+#include <libavutil/audio_fifo.h>
+#include <libavutil/fifo.h>
 #include <libavutil/hwcontext.h>
 #ifdef __cplusplus
 }
@@ -80,6 +82,8 @@ typedef struct {
   /* context */
   void *mx_sockserver;
   void *mx_video_pipeserver;
+  void *mx_audio_pipeserver;
+
   int is_stop;
   int audio_stream_idx;
   int video_stream_idx;
@@ -90,7 +94,13 @@ typedef struct {
   int video_fps;
   int video_bitrate;
 
-  pthread_t io_worker;
+  int audio_sample_rate;
+  int audio_channels;
+  int audio_format;
+  int audio_bitrate;
+
+  pthread_t video_io_worker;
+  pthread_t audio_io_worker;
 
 } MxContext;
 

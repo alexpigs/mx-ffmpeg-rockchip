@@ -96,6 +96,7 @@
         "im2d_version.h": "c",
         "im2d_type.h": "c",
         "im2d_mpi.h": "c",
-        "rgaapi.h": "c"
+        "rgaapi.h": "c",
+        "internal.h": "c"
     }
 }
