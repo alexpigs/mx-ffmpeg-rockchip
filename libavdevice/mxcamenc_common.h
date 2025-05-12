@@ -22,7 +22,7 @@ extern "C" {
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/thread.h"
-
+#include <libavutil/hwcontext.h>
 #ifdef __cplusplus
 }
 #endif
@@ -92,15 +92,6 @@ typedef struct {
 
   pthread_t io_worker;
 
-  pthread_mutex_t vl_mutex;
-  pthread_cond_t vl_cond;
-  PacketList video_list;
-  int video_packet_cnt;
-
-  pthread_mutex_t al_mutex;
-  pthread_cond_t al_cond;
-  PacketList audio_list;
-  int audio_packet_cnt;
 } MxContext;
 
 #endif

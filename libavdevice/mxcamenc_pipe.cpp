@@ -34,17 +34,24 @@
 #include "im2d.h"
 #include "mxcam_dma_allocator.h"
 #include <chrono>
+#include <condition_variable>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define MAX_CMD_SIZE 1024
 using namespace std::chrono;
 using boost::asio::ip::tcp;
 
-typedef boost::shared_ptr<tcp::socket> socket_ptr;
+static inline char *av_err2str2(int errnum) {
+  static char errbuf_static[AV_ERROR_MAX_STRING_SIZE] = {0};
+  av_strerror(errnum, errbuf_static, AV_ERROR_MAX_STRING_SIZE);
+  return errbuf_static;
+}
 
 static inline int _parse_query(const char *query, char *query_name,
                                int query_name_size, const char **query_param) {
@@ -490,38 +497,84 @@ public:
   }
 };
 
-static void mxcam_add_video_packet(MxContext *mx, AVPacket *pkt) {
-  pthread_mutex_lock(&mx->vl_mutex);
-  avpriv_packet_list_put(&mx->video_list, pkt, NULL, 0);
+class MxCamFrameCache {
+public:
+  static MxCamFrameCache *getInstance() {
+    static MxCamFrameCache instance;
+    return &instance;
+  }
+#define MAX_VIDEO_FRAME_CACHE 30
 
-  if (mx->video_packet_cnt >= 30) {
-    AVPacket pkt1;
-    if (avpriv_packet_list_get(&mx->video_list, &pkt1) == 0) {
-      av_packet_unref(&pkt1);
+private:
+  std::list<AVFrame *> mVideoFrameCache;
+  std::mutex mVideoMutex;
+  std::condition_variable mVideoCond;
+
+private:
+  MxCamFrameCache() {}
+  ~MxCamFrameCache() {}
+
+public:
+  void addVideoFrame(AVFrame *frame) {
+    std::unique_lock<std::mutex> lock(mVideoMutex);
+    if (mVideoFrameCache.size() >= MAX_VIDEO_FRAME_CACHE) {
+      AVFrame *old_frame = mVideoFrameCache.front();
+      mVideoFrameCache.pop_front();
+      av_frame_free(&old_frame);
     }
-  } else {
-    mx->video_packet_cnt++;
+    mVideoFrameCache.push_back(frame);
+    mVideoCond.notify_one();
   }
-  pthread_cond_signal(&mx->vl_cond);
-  pthread_mutex_unlock(&mx->vl_mutex);
-}
 
-static AVPacket *mxcam_get_video_packet(MxContext *mx) {
-  static AVPacket *last_pkt = NULL;
+  AVFrame *getVideoFrame() {
+    std::unique_lock<std::mutex> lock(mVideoMutex);
+    if (mVideoFrameCache.empty()) {
+      return NULL;
+    } else if (mVideoFrameCache.size() == 1) {
+      // 只有一个元素, 复制返回
+      AVFrame *frame = mVideoFrameCache.front();
+      return av_frame_clone(frame);
+    }
+    AVFrame *frame = mVideoFrameCache.front();
+    mVideoFrameCache.pop_front();
+    return frame;
+  }
+};
+
+static int mxcam_add_video_packet(MxContext *mx, AVFrame *src_frame) {
+
+  const char *x = av_get_pix_fmt_name((AVPixelFormat)src_frame->format);
+  const char *fmt = x ? x : "unknown";
   int ret = 0;
-  AVPacket *pkt = NULL;
+  // pkt pix is drm,,copy frame frame gpu to cpu, and insert to list
+  if (src_frame->format == AV_PIX_FMT_DRM_PRIME) {
+    AVFrame *sw_frame = av_frame_alloc();
+    if (!sw_frame) {
+      ALOGE("mxcam_add_video_packet av_frame_alloc sw_frame failed");
+      return -1;
+    }
+    /* retrieve data from GPU to CPU */
+    if ((ret = av_hwframe_transfer_data(sw_frame, src_frame, 0)) != 0) {
+      ALOGE("av_hwframe_transfer_data failed %s", av_err2str2(ret));
+      av_frame_free(&sw_frame);
+      return -1;
+    }
+    if ((ret = av_frame_copy_props(sw_frame, src_frame)) < 0) {
+      ALOGE("av_frame_copy_props failed %s", av_err2str2(ret));
+      av_frame_free(&sw_frame);
+      return -1;
+    }
 
-  pthread_mutex_lock(&mx->vl_mutex);
-  ALOGD("mxcam_get_video_packet video_packet_cnt=%d", mx->video_packet_cnt);
-  if (mx->video_packet_cnt == 1) {
-    pkt = av_packet_clone(&mx->video_list.head->pkt);
-  } else if (mx->video_packet_cnt > 1) {
-    mx->video_packet_cnt--;
-    pkt = av_packet_alloc();
-    avpriv_packet_list_get(&mx->video_list, pkt);
+    MxCamFrameCache::getInstance()->addVideoFrame(sw_frame);
+    return 0;
+  } else if (src_frame->format == AV_PIX_FMT_NV12) {
+    MxCamFrameCache::getInstance()->addVideoFrame(av_frame_clone(src_frame));
+    return 0;
+  } else {
+    ALOGE("mxcam_add_video_packet src_frame pix fmt %d:%s not drm",
+          src_frame->format, fmt);
   }
-  pthread_mutex_unlock(&mx->vl_mutex);
-  return pkt;
+  return -1;
 }
 
 class MxCamSockClient : public boost::enable_shared_from_this<MxCamSockClient>,
@@ -688,15 +741,9 @@ private:
       return 0;
     } else if (strcmp(query_name, _cmd_query_vframe) == 0) {
 
-      AVPacket *packet = mxcam_get_video_packet(mMxCtx);
-      if (!packet) {
-        ALOGE("MXCamEnc: no packet exist. waitting");
-        return 0;
-      }
-      AVFrame *frame = (AVFrame *)packet->data;
+      AVFrame *frame = MxCamFrameCache::getInstance()->getVideoFrame();
       if (!frame) {
         ALOGE("MxCamClient: get frame from packet failed");
-        av_packet_free(&packet);
         return -1;
       }
 
@@ -715,7 +762,7 @@ private:
           (uint8_t *)mReplyBuf, frameSize, frame->data, frame->linesize,
           (AVPixelFormat)frame->format, frame->width, frame->height, 1);
 
-      av_packet_free(&packet);
+      av_frame_free(&frame);
 
       if (bytesCopied != frameSize) {
         ALOGE("MXCamEnc: copy video frame failed");
@@ -972,15 +1019,9 @@ public:
       return -1;
     }
 
-    AVPacket *packet = mxcam_get_video_packet(mMxCtx);
-    if (!packet) {
-      ALOGE("no packet exist. waitting");
-      return 0;
-    }
-    AVFrame *frame = (AVFrame *)packet->data;
+    AVFrame *frame = MxCamFrameCache::getInstance()->getVideoFrame();
     if (!frame) {
-      ALOGE("get frame from packet failed");
-      av_packet_free(&packet);
+      ALOGE("MxCamClient: get frame from packet failed");
       return -1;
     }
 
@@ -1001,7 +1042,7 @@ public:
         (uint8_t *)mReplyBuf, frameSize, frame->data, frame->linesize,
         (AVPixelFormat)frame->format, frame->width, frame->height, 1);
 
-    av_packet_free(&packet);
+    av_frame_free(&frame);
 
     if (bytesCopied != frameSize) {
       ALOGE("MXCamEnc: copy video frame failed");
@@ -1083,11 +1124,12 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
-      const char *fmt =
-          av_get_pix_fmt_name((AVPixelFormat)((AVFrame *)pkt->data)->format);
-      ALOGD("MXCamEnc: add video packet %d, fmt:%s", pkt->size,
-            fmt ? fmt : "unknown");
-      mxcam_add_video_packet(mx, pkt);
+      // const char *fmt =
+      //     av_get_pix_fmt_name((AVPixelFormat)((AVFrame *)pkt->data)->format);
+      // ALOGD("MXCamEnc: add video packet %d, fmt:%s", pkt->size,
+      //       fmt ? fmt : "unknown");
+      // mxcam_add_video_packet(mx, pkt);
+      return mxcam_add_video_packet(mx, (AVFrame *)pkt->data);
     }
   } else {
     ALOGE("MXCamEnc: unknown stream index %d\n", pkt->stream_index);
