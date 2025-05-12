@@ -22,3 +22,6 @@ releae
 
 
 netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 connectport=40121 connectaddress=192.168.132.92
+
+
+.\bin\ffmpeg -re -stream_loop -1 -i 云手机设置推流-01.mp4 -vf "scale=1072:-1" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f flv rtmp://47.100.44.74/myapp/ec2a15d
