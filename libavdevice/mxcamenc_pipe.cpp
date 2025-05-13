@@ -667,7 +667,10 @@ public:
     if (cache_size < audio_size) {
       ALOGE("audio buffer not enough, need %d bytes, but only %d bytes",
             audio_size, cache_size);
-      return -1;
+      // return -1;
+      av_fifo_read(mAudioFifo, buf, cache_size);
+      memset(buf + cache_size, 0, audio_size - cache_size);
+      return audio_size;
     }
 
     int bytes_read = av_fifo_read(mAudioFifo, buf, audio_size);
