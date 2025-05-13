@@ -307,14 +307,14 @@ static inline int pipe_write_data(int fd, const char *buffer, int size,
     auto elapsed_time =
         duration_cast<std::chrono::milliseconds>(end_tp - start_tp);
     if (timeout_ms > 0 && elapsed_time.count() > timeout_ms) {
-      ALOGE("timeout");
+      ALOGE("timeout write %dbyte in %dms", size, timeout_ms);
       ret = -1;
       break;
     }
 
-    ALOGD("try poll timeout=%d", timeout_ms);
+    // ALOGD("try poll timeout=%d", timeout_ms);
     ret = poll(fds, 1, timeout_ms);
-    ALOGD("poll=%d", ret);
+    // ALOGD("poll=%d", ret);
 
     if (ret == 0) {
       continue;
@@ -335,16 +335,16 @@ static inline int pipe_write_data(int fd, const char *buffer, int size,
        */
       while ((ret = write(fd, (char *)buffer + bytes_written,
                           size - bytes_written)) > 0) {
-        ALOGD("pipe_write_data ret=%d, bytes_written=%d, size=%d", ret,
-              bytes_written, size);
+        // ALOGD("pipe_write_data ret=%d, bytes_written=%d, size=%d", ret,
+        //       bytes_written, size);
         bytes_written += ret;
         if (bytes_written == size) {
           return size;
         }
       }
 
-      ALOGD("pipe_write_data ret=%d,  bytes_written=%d, size=%d, err=%d:%s",
-            ret, bytes_written, size, errno, strerror(errno));
+      // ALOGD("pipe_write_data ret=%d,  bytes_written=%d, size=%d, err=%d:%s",
+      //       ret, bytes_written, size, errno, strerror(errno));
       if (errno == EAGAIN) {
         continue;
       } else if (errno == EPIPE) {
@@ -459,8 +459,9 @@ public:
     // check need resize
     if (src_width > dst_width || src_height > dst_height) {
       // 等比缩放, 按照最大的比例缩放
-      ALOGD("resize 1 video frame from %dx%d to %dx%d", src_width, src_height,
-            dst_width, dst_height);
+      // ALOGD("resize 1 video frame from %dx%d to %dx%d", src_width,
+      // src_height,
+      //       dst_width, dst_height);
       float scale_x = (float)src_width / dst_width;
       float scale_y = (float)src_height / dst_height;
 
@@ -476,8 +477,8 @@ public:
       new_width -= new_width % 16;
       new_height -= new_height % 4;
 
-      ALOGD("resize 2 video frame %dx%d to %dx%d", src_width, src_height,
-            new_width, new_height);
+      // ALOGD("resize 2 video frame %dx%d to %dx%d", src_width, src_height,
+      //       new_width, new_height);
 
       rga_buffer_t srcImage = wrapbuffer_handle(
           mDmaBufferHandle1, src_width, src_height, RK_FORMAT_YCbCr_420_SP);
@@ -495,14 +496,14 @@ public:
         ALOGE("imresize failed %s", imStrError(ret));
         return ret;
       }
-      ALOGD("resize video frame success size=%d",
-            new_width * new_height * 3 / 2);
+      // ALOGD("resize video frame success size=%d",
+      //       new_width * new_height * 3 / 2);
     } else {
       new_width = src_width;
       new_height = src_height;
       memcpy(mDmaBuffer2, src, src_size);
-      ALOGD("no need to resize video frame %dx%d to %dx%d", src_width,
-            src_height, new_width, new_height);
+      // ALOGD("no need to resize video frame %dx%d to %dx%d", src_width,
+      //       src_height, new_width, new_height);
     }
 
     // fill padding
@@ -533,7 +534,7 @@ public:
       ALOGE("immakeBorder failed %s", imStrError(ret));
       return ret;
     }
-    ALOGD("immakeBorder success size=%d", dst_width * dst_height * 3 / 2);
+    // ALOGD("immakeBorder success size=%d", dst_width * dst_height * 3 / 2);
 
     if (dst_rotate == 1) {
       rga_buffer_t srcImage3 = wrapbuffer_handle(
@@ -552,7 +553,7 @@ public:
         ALOGE("imrotate failed %s", imStrError(ret));
         return ret;
       }
-      ALOGD("imrotate success size=%d", dst_width * dst_height * 3 / 2);
+      // ALOGD("imrotate success size=%d", dst_width * dst_height * 3 / 2);
       // memcpy(dst, mDmaBuffer2, dst_width * dst_height * 3 / 2);
       *dst = mDmaBuffer2;
     } else {
@@ -565,7 +566,7 @@ public:
 };
 
 #define AUDIO_BYTES_PER_SECOND (44100 * 2 * 2)
-#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 10)
+#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 1)
 class MxCamFrameCache {
 public:
   static MxCamFrameCache *getInstance() {
@@ -575,6 +576,8 @@ public:
 #define MAX_VIDEO_FRAME_CACHE 30
 
 private:
+  std::mutex mMxCacheMutex; // 音视频共用锁, 调试用
+
   std::list<AVFrame *> mVideoFrameCache;
   std::mutex mVideoMutex;
   std::condition_variable mVideoCond;
@@ -602,7 +605,7 @@ private:
 
 public:
   void addVideoFrame(AVFrame *frame) {
-    std::unique_lock<std::mutex> lock(mVideoMutex);
+    std::unique_lock<std::mutex> lock(mMxCacheMutex);
     mVideoFrameCache.push_back(frame);
     // ALOGD("mxcam add video frame, pts=%d", frame->pts);
     if (mVideoFrameCache.size() >= MAX_VIDEO_FRAME_CACHE) {
@@ -616,7 +619,7 @@ public:
   }
 
   AVFrame *getVideoFrame() {
-    std::unique_lock<std::mutex> lock(mVideoMutex);
+    std::unique_lock<std::mutex> lock(mMxCacheMutex);
     if (mVideoFrameCache.empty()) {
       return NULL;
     } else if (mVideoFrameCache.size() == 1) {
@@ -633,12 +636,12 @@ public:
 
   void add_audio_frame(AVCodecParameters *par, const uint8_t *buf, int size) {
 
-    std::unique_lock<std::mutex> lock(mAudioBufferMutex);
+    std::unique_lock<std::mutex> lock(mMxCacheMutex);
     int ret = 0;
     int space = av_fifo_can_write(mAudioFifo);
     if (space < size) {
       av_fifo_drain2(mAudioFifo, size - space);
-      ALOGE("av_fifo_drain2 %d bytes", size - space);
+      // ALOGE("av_fifo_drain2 %d bytes", size - space);
     }
 
     multiply_by_volume(mVolumn, (int16_t *)buf, size / 2);
@@ -650,12 +653,12 @@ public:
     }
     mAudioBufferCond.notify_one();
     int cache_size = av_fifo_can_read(mAudioFifo);
-    ALOGD("audo frame total cache:%d", cache_size);
+    // ALOGD("audo frame total cache:%d", cache_size);
   }
 
   int get_audio_frame(char *buf, int audio_size, int format, int sample_rate_hz,
                       int ch) {
-    std::unique_lock<std::mutex> lock(mAudioBufferMutex);
+    std::unique_lock<std::mutex> lock(mMxCacheMutex);
 
     int cache_size = av_fifo_can_read(mAudioFifo);
     ALOGD("audio size=%d/%d format=%d hz=%d ch=%d ", audio_size, cache_size,
@@ -1025,12 +1028,30 @@ public:
     return 0;
   }
 
+  void clear_pipe_data(int fd) {
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    while (poll(&pfd, 1, 100) == 1) {
+      if (pfd.revents & POLLIN) {
+        // ALOGD("clear pipe data");
+        char buf[1024 * 1024] = {0};
+        int ret = read(fd, buf, sizeof(buf));
+        if (ret <= 0) {
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+  }
+
   void stop() {
     if (mRdFd >= 0) {
+      clear_pipe_data(mRdFd);
       close(mRdFd);
       mRdFd = -1;
     }
     if (mWtFd >= 0) {
+      clear_pipe_data(mWtFd);
       close(mWtFd);
       mWtFd = -1;
     }
@@ -1045,16 +1066,16 @@ public:
     char cmd[1024] = {0};
     int ret = pipe_read_string(mRdFd, cmd, sizeof(cmd), -1);
     if (ret <= 0) {
-      ALOGE("read command failed %d", ret);
+      ALOGE("%s read command failed %d", get_pipe_name(), ret);
       return -1;
     }
 
-    ALOGD("run_once command: %s", cmd);
+    ALOGD("%s run_once command: %s", get_pipe_name(), cmd);
     char *reply = NULL;
     int reply_size = 0;
     ret = handle_command(cmd, &reply, &reply_size);
     if (ret < 0) {
-      ALOGE("handle command failed %d", ret);
+      ALOGE("%s handle command failed %d", get_pipe_name(), ret);
       return -1;
     }
 
@@ -1065,26 +1086,29 @@ public:
       snprintf(reply_header, sizeof(reply_header), "00000003ok\0");
     }
 
-    ALOGD("run_once try reply_header: %s", reply_header);
+    ALOGD("%s run_once try reply_header: %s", get_pipe_name(), reply_header);
 
     ret = pipe_write_data(mWtFd, reply_header, 11, timeout_ms);
     if (ret < 0 || ret != 11) {
-      ALOGE("write header(11 bytes) failed %d", ret);
+      ALOGE("%s write header(11 bytes) failed %d", get_pipe_name(), ret);
       return -1;
     }
     if (reply_size > 0) {
-      ALOGD("run_once try reply data: %d bytes", reply_size);
+      ALOGD("%s run_once try reply data: %d bytes", get_pipe_name(),
+            reply_size);
       ret = pipe_write_data(mWtFd, reply, reply_size, timeout_ms);
       if (ret < 0 || ret != reply_size) {
-        ALOGE("write data(%d bytes) failed %d", reply_size, ret);
+        ALOGE("%s write data(%d bytes) failed %d", get_pipe_name(), reply_size,
+              ret);
         return -1;
       }
     }
-    ALOGD("run_once ok");
+    ALOGD("%s run_once ok", get_pipe_name());
     return 0;
   }
 
 private:
+  virtual const char *get_pipe_name() { return "MxCamPipe"; }
   virtual int handle_command_start(const char *params, char **reply,
                                    int *reply_size) {
     return 0;
@@ -1213,6 +1237,7 @@ public:
     }
     MxCamPipe::stop();
   }
+  virtual const char *get_pipe_name() { return "VideoPipe"; }
 };
 
 static void *videopipe_threadfunc(void *arg) {
@@ -1261,8 +1286,8 @@ public:
       *reply_size = 0;
       return -1;
     }
-    ALOGD("audio queryFrame: audio size=%d format=%d hz=%d ch=%d time=%d",
-          audio_size, format, sample_rate_hz, ch, tt);
+    // ALOGD("audio queryFrame: audio size=%d format=%d hz=%d ch=%d time=%d",
+    //       audio_size, format, sample_rate_hz, ch, tt);
 
     if (mReplyBufSize < audio_size) {
       if (mReplyBuf) {
@@ -1289,6 +1314,7 @@ public:
   }
 
   void stop() { MxCamPipe::stop(); }
+  virtual const char *get_pipe_name() { return "AudioPipe"; }
 };
 
 static void *audiopipe_threadfunc(void *arg) {

@@ -49,11 +49,13 @@ static inline void __log_print__x123(int level, const char *fmt, const char *f,
   vsnprintf(buffer, sizeof(buffer) - 1, fmt, args);
 
   if (level == 4) {
-    printf("\033[31m%s\033[0m:%ldus \033[32m%s:%d \033[33m%s\033[0m\n", "ERROR",
-           usec, func, line, buffer);
+    printf("\033[31m%s\033[0m:%ldus \033[32m%s:%d:\033[34m%s ", "ERROR", usec,
+           f, line, func);
+    printf("\033[31m%s\033[0m\n", buffer);
   } else {
-    printf("\033[34m%s\033[0m:%ldus \033[32m%s:%d \033[33m%s\033[0m\n", "DEBUG",
-           usec, func, line, buffer);
+    printf("\033[34m%s\033[0m:%ldus \033[32m%s:%d:\033[34m%s ", "DEBUG", usec,
+           f, line, func);
+    printf("\033[33m%s\033[0m\n", buffer);
   }
 }
 
