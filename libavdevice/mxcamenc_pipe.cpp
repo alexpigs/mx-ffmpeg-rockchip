@@ -75,6 +75,67 @@ static inline int _parse_query(const char *query, char *query_name,
   return 0;
 }
 
+void multiply_by_volume(const float volume, int16_t *a, const size_t n) {
+  constexpr int_fast32_t kDenominator = 32768;
+  const int_fast32_t numerator =
+      static_cast<int_fast32_t>(round(volume * kDenominator));
+
+  if (numerator >= kDenominator) {
+    return; // (numerator > kDenominator) is not expected
+  } else if (numerator <= 0) {
+    memset(a, 0, n * sizeof(*a));
+    return; // (numerator < 0) is not expected
+  }
+
+  int16_t *end = a + n;
+
+  // The unroll code below is to save on CPU branch instructions.
+  // 8 is arbitrary chosen.
+
+#define STEP                                                                   \
+  *a = (*a * numerator + kDenominator / 2) / kDenominator;                     \
+  ++a
+
+  switch (n % 8) {
+  case 7:
+    goto l7;
+  case 6:
+    goto l6;
+  case 5:
+    goto l5;
+  case 4:
+    goto l4;
+  case 3:
+    goto l3;
+  case 2:
+    goto l2;
+  case 1:
+    goto l1;
+  default:
+    break;
+  }
+
+  while (a < end) {
+    STEP;
+  l7:
+    STEP;
+  l6:
+    STEP;
+  l5:
+    STEP;
+  l4:
+    STEP;
+  l3:
+    STEP;
+  l2:
+    STEP;
+  l1:
+    STEP;
+  }
+
+#undef STEP
+}
+
 static inline int pipe_read_string(int fd, char *buffer, int size,
                                    int timeout_ms) {
   int bytes_read = 0;
@@ -503,6 +564,8 @@ public:
   }
 };
 
+#define AUDIO_BYTES_PER_SECOND (44100 * 2 * 2)
+#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 10)
 class MxCamFrameCache {
 public:
   static MxCamFrameCache *getInstance() {
@@ -516,9 +579,26 @@ private:
   std::mutex mVideoMutex;
   std::condition_variable mVideoCond;
 
+  std::mutex mAudioBufferMutex;
+  std::condition_variable mAudioBufferCond;
+  std::mutex mAudioBufferCondMutext;
+  AVFifo *mAudioFifo = NULL;
+  float mVolumn = 5.0; // 声音大小
+
 private:
-  MxCamFrameCache() {}
-  ~MxCamFrameCache() {}
+  MxCamFrameCache() {
+    mAudioFifo = av_fifo_alloc2(AUDIO_CACHE_SIZE, 1, AV_FIFO_FLAG_AUTO_GROW);
+  }
+  ~MxCamFrameCache() {
+    if (mAudioFifo) {
+      av_fifo_freep2(&mAudioFifo);
+      mAudioFifo = NULL;
+    }
+    for (auto frame : mVideoFrameCache) {
+      av_frame_free(&frame);
+    }
+    mVideoFrameCache.clear();
+  }
 
 public:
   void addVideoFrame(AVFrame *frame) {
@@ -549,6 +629,52 @@ public:
     mVideoFrameCache.pop_front();
     // ALOGD("mxcam get video frame, pts=%d", frame->pts);
     return frame;
+  }
+
+  void add_audio_frame(AVCodecParameters *par, const uint8_t *buf, int size) {
+
+    std::unique_lock<std::mutex> lock(mAudioBufferMutex);
+    int ret = 0;
+    int space = av_fifo_can_write(mAudioFifo);
+    if (space < size) {
+      av_fifo_drain2(mAudioFifo, size - space);
+      ALOGE("av_fifo_drain2 %d bytes", size - space);
+    }
+
+    multiply_by_volume(mVolumn, (int16_t *)buf, size / 2);
+
+    ret = av_fifo_write(mAudioFifo, buf, size);
+    if (ret < 0) {
+      ALOGE("audio fifo write failed %d", ret);
+      return;
+    }
+    mAudioBufferCond.notify_one();
+    int cache_size = av_fifo_can_read(mAudioFifo);
+    ALOGD("audo frame total cache:%d", cache_size);
+  }
+
+  int get_audio_frame(char *buf, int audio_size, int format, int sample_rate_hz,
+                      int ch) {
+    std::unique_lock<std::mutex> lock(mAudioBufferMutex);
+
+    int cache_size = av_fifo_can_read(mAudioFifo);
+    ALOGD("audio size=%d/%d format=%d hz=%d ch=%d ", audio_size, cache_size,
+          format, sample_rate_hz, ch);
+
+    if (cache_size < audio_size) {
+      ALOGE("audio buffer not enough, need %d bytes, but only %d bytes",
+            audio_size, cache_size);
+      return -1;
+    }
+
+    int bytes_read = av_fifo_read(mAudioFifo, buf, audio_size);
+    if (bytes_read < 0) {
+      ALOGE("audio fifo read failed %d %s", bytes_read,
+            av_err2str2(bytes_read));
+      return -1;
+    }
+
+    return audio_size;
   }
 };
 
@@ -1109,26 +1235,16 @@ static void *videopipe_threadfunc(void *arg) {
   return 0;
 }
 
-#define AUDIO_BYTES_PER_SECOND (44100 * 2 * 2)
-#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 10)
-
 class MxCamAudioPipe : public MxCamPipe {
 private:
   MxContext *mMxCtx;
-
-  std::mutex mBufferMutex;
-  std::condition_variable mBufferCond;
-  std::mutex mBufferCondMutext;
-  AVFifo *mAudioFifo = NULL;
 
   char *mReplyBuf = NULL;
   int mReplyBufSize = 0;
 
 public:
   MxCamAudioPipe(MxContext *mx, const char *rd_file, const char *wt_file)
-      : MxCamPipe(rd_file, wt_file), mMxCtx(mx) {
-    mAudioFifo = av_fifo_alloc2(AUDIO_CACHE_SIZE, 1, AV_FIFO_FLAG_AUTO_GROW);
-  }
+      : MxCamPipe(rd_file, wt_file), mMxCtx(mx) {}
 
   ~MxCamAudioPipe() { stop(); }
 
@@ -1148,28 +1264,6 @@ public:
     ALOGD("audio queryFrame: audio size=%d format=%d hz=%d ch=%d time=%d",
           audio_size, format, sample_rate_hz, ch, tt);
 
-    // {
-    //   std::unique_lock<std::mutex> __lockxx(mBufferCondMutext);
-    //   while (!mBufferCond.wait_for(
-    //       __lockxx, std::chrono::milliseconds(100),
-    //       [this, audio_size] { return mBufferPos >= audio_size; })) {
-    //     ALOGD("audio wait for data %d/%d", mBufferPos, audio_size);
-    //   }
-    // }
-
-    std::unique_lock<std::mutex> lock(mBufferMutex);
-
-    int cache_size = av_fifo_can_read(mAudioFifo);
-    ALOGD("audio queryFrame: audio size=%d/%d format=%d hz=%d ch=%d "
-          "time=%d",
-          audio_size, cache_size, format, sample_rate_hz, ch, tt);
-
-    if (cache_size < audio_size) {
-      ALOGE("audio buffer not enough, need %d bytes, but only %d bytes",
-            audio_size, cache_size);
-      return -1;
-    }
-
     if (mReplyBufSize < audio_size) {
       if (mReplyBuf) {
         free(mReplyBuf);
@@ -1178,47 +1272,23 @@ public:
       mReplyBufSize = audio_size;
     }
 
-    av_fifo_read(mAudioFifo, mReplyBuf, audio_size);
+    int ret = MxCamFrameCache::getInstance()->get_audio_frame(
+        mReplyBuf, audio_size, format, sample_rate_hz, ch);
 
-    // av_fifo_generic_read(mAudioFifo, mReplyBuf, audio_size, NULL);
+    if (ret < 0) {
+      ALOGE("get audio frame failed %d", ret);
+      return -1;
+    } else if (ret != audio_size) {
+      ALOGE("get audio frame size %d/%d", ret, audio_size);
+      return -1;
+    }
 
     *reply = mReplyBuf;
     *reply_size = audio_size;
     return 0;
   }
 
-  void stop() {
-    if (mAudioFifo) {
-      av_fifo_freep2(&mAudioFifo);
-      mAudioFifo = NULL;
-    }
-    MxCamPipe::stop();
-  }
-
-  void add_audio_frame(AVCodecParameters *par, const uint8_t *buf, int size) {
-
-    std::unique_lock<std::mutex> lock(mBufferMutex);
-    int ret = 0;
-    int space = av_fifo_can_write(mAudioFifo);
-    if (space < size) {
-      // ret = av_fifo_grow2(mAudioFifo, size - space);
-      // if (ret < 0) {
-      //   ALOGE("audio fifo grow failed %d", ret);
-      //   return;
-      // }
-      av_fifo_drain2(mAudioFifo, size - space);
-      ALOGE("av_fifo_drain2 %d bytes", size - space);
-    }
-
-    ret = av_fifo_write(mAudioFifo, buf, size);
-    if (ret < 0) {
-      ALOGE("audio fifo write failed %d", ret);
-      return;
-    }
-    mBufferCond.notify_one();
-    int cache_size = av_fifo_can_read(mAudioFifo);
-    ALOGD("audo frame total cache:%d", cache_size);
-  }
+  void stop() { MxCamPipe::stop(); }
 };
 
 static void *audiopipe_threadfunc(void *arg) {
@@ -1249,6 +1319,7 @@ int mxcam_start_server(MxContext *mx) {
   char rd_file[256];
   char wt_file[256];
 
+  // create audio pipe
   snprintf(rd_file, sizeof(rd_file), ACRTL_FILE, phone);
   snprintf(wt_file, sizeof(wt_file), AREPLY_FILE, phone);
 
@@ -1263,6 +1334,7 @@ int mxcam_start_server(MxContext *mx) {
   pthread_create(&mx->audio_io_worker, NULL, audiopipe_threadfunc, mx);
   ALOGD("audiopipe_threadfunc create %d\n", mx->phone);
 
+  // create video pipe
   snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone);
   snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone);
 
@@ -1287,8 +1359,7 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
     AVCodecParameters *par = s1->streams[pkt->stream_index]->codecpar;
-    MxCamAudioPipe *pipe = (MxCamAudioPipe *)mx->mx_audio_pipeserver;
-    pipe->add_audio_frame(par, pkt->data, pkt->size);
+    MxCamFrameCache::getInstance()->add_audio_frame(par, pkt->data, pkt->size);
     // get bytes in 1 second
 
     return 0;
