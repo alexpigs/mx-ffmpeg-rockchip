@@ -42,3 +42,5 @@
 /mapfile
 /tools/python/__pycache__/
 /out/
+/deb/
+/mxffmpeg.tar
