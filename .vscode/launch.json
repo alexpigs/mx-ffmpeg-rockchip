@@ -21,6 +21,7 @@
                 "-1",
                 "-i",
                 "rtmp://47.100.44.74/myapp/ec2a15d",
+                // "rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc",
                 // "/mnt/data/v2c/videos/test2.mp4",
                 "-vf",
                 // "hwupload,vpp_rkrga=transpose=cclock,hwdownload,format=nv12",

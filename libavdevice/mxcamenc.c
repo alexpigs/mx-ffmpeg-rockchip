@@ -39,6 +39,8 @@ static int write_header(AVFormatContext *s1) {
       mx->audio_channels = st->codecpar->channels;
       mx->audio_format = st->codecpar->format;
       mx->audio_bitrate = st->codecpar->bit_rate;
+      mx->audio_time_base = st->time_base;
+      mx->audio_start_time = st->start_time;
       ALOGD("MXCamEnc: audio stream %d, sample_rate=%d, channels=%d\n", i,
             mx->audio_sample_rate, mx->audio_channels);
     } else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -48,6 +50,8 @@ static int write_header(AVFormatContext *s1) {
       mx->video_format = st->codecpar->format;
       mx->video_fps = av_q2d(st->avg_frame_rate);
       mx->video_bitrate = st->codecpar->bit_rate;
+      mx->video_time_base = st->time_base;
+      mx->video_start_time = st->start_time;
       ALOGD("MXCamEnc: video stream %d, width=%d, height=%d\n", i,
             mx->video_width, mx->video_height);
       if (st->codecpar->codec_id != AV_CODEC_ID_WRAPPED_AVFRAME) {

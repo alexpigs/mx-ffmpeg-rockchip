@@ -512,9 +512,9 @@ public:
     int leftBorder = (dst_width - new_width) / 2;
     int rightBorder = dst_width - new_width - leftBorder;
 
-    ALOGD("pad video frame %dx%d to %dx%d top=%d bottom=%d left=%d right=%d",
-          new_width, new_height, dst_width, dst_height, topBorder, bottomBorder,
-          leftBorder, rightBorder);
+    // ALOGD("pad video frame %dx%d to %dx%d top=%d bottom=%d left=%d right=%d",
+    //       new_width, new_height, dst_width, dst_height, topBorder,
+    //       bottomBorder, leftBorder, rightBorder);
 
     rga_buffer_t srcImage2 = wrapbuffer_handle(
         mDmaBufferHandle2, new_width, new_height, RK_FORMAT_YCbCr_420_SP);
@@ -604,7 +604,8 @@ private:
   }
 
 public:
-  void addVideoFrame(AVFrame *frame) {
+  void addVideoFrame(MxContext *mx, AVCodecParameters *par, AVPacket *pkt,
+                     AVFrame *frame) {
     std::unique_lock<std::mutex> lock(mMxCacheMutex);
     mVideoFrameCache.push_back(frame);
     // ALOGD("mxcam add video frame, pts=%d", frame->pts);
@@ -616,6 +617,8 @@ public:
       av_frame_free(&old_frame);
     }
     mVideoCond.notify_one();
+    // ALOGD("mxcam video frame play_time=%zu",
+    //       pkt->pts * 1000 * av_q2d(mx->video_time_base));
   }
 
   AVFrame *getVideoFrame() {
@@ -634,7 +637,8 @@ public:
     return frame;
   }
 
-  void add_audio_frame(AVCodecParameters *par, const uint8_t *buf, int size) {
+  void add_audio_frame(MxContext *mx, AVCodecParameters *par, AVPacket *pkt,
+                       const uint8_t *buf, int size) {
 
     std::unique_lock<std::mutex> lock(mMxCacheMutex);
     int ret = 0;
@@ -652,7 +656,7 @@ public:
       return;
     }
     mAudioBufferCond.notify_one();
-    int cache_size = av_fifo_can_read(mAudioFifo);
+    // int cache_size = av_fifo_can_read(mAudioFifo);
     // ALOGD("audo frame total cache:%d", cache_size);
   }
 
@@ -661,8 +665,8 @@ public:
     std::unique_lock<std::mutex> lock(mMxCacheMutex);
 
     int cache_size = av_fifo_can_read(mAudioFifo);
-    ALOGD("audio size=%d/%d format=%d hz=%d ch=%d ", audio_size, cache_size,
-          format, sample_rate_hz, ch);
+    // ALOGD("audio size=%d/%d format=%d hz=%d ch=%d ", audio_size, cache_size,
+    //       format, sample_rate_hz, ch);
 
     if (cache_size < audio_size) {
       ALOGE("audio buffer not enough, need %d bytes, but only %d bytes",
@@ -684,7 +688,8 @@ public:
   }
 };
 
-static int mxcam_add_video_packet(MxContext *mx, AVFrame *src_frame) {
+static int mxcam_add_video_packet(MxContext *mx, AVCodecParameters *par,
+                                  AVPacket *pkt, AVFrame *src_frame) {
 
   const char *x = av_get_pix_fmt_name((AVPixelFormat)src_frame->format);
   const char *fmt = x ? x : "unknown";
@@ -708,10 +713,11 @@ static int mxcam_add_video_packet(MxContext *mx, AVFrame *src_frame) {
       return -1;
     }
 
-    MxCamFrameCache::getInstance()->addVideoFrame(sw_frame);
+    MxCamFrameCache::getInstance()->addVideoFrame(mx, par, pkt, sw_frame);
     return 0;
   } else if (src_frame->format == AV_PIX_FMT_NV12) {
-    MxCamFrameCache::getInstance()->addVideoFrame(av_frame_clone(src_frame));
+    MxCamFrameCache::getInstance()->addVideoFrame(mx, par, pkt,
+                                                  av_frame_clone(src_frame));
     return 0;
   } else {
     ALOGE("mxcam_add_video_packet src_frame pix fmt %d:%s not drm",
@@ -719,245 +725,6 @@ static int mxcam_add_video_packet(MxContext *mx, AVFrame *src_frame) {
   }
   return -1;
 }
-
-class MxCamSockClient : public boost::enable_shared_from_this<MxCamSockClient>,
-                        private boost::noncopyable {
-private:
-  boost::asio::io_context &mIoContext;
-  boost::asio::ip::tcp::socket mClientSocket;
-  // timer
-  boost::asio::steady_timer mTimer;
-  char mRecvBuf[MAX_CMD_SIZE] = {0};
-  int mRecvBufPos = 0;
-  MxContext *mMxCtx;
-
-  std::chrono::steady_clock::time_point mLastActionTime;
-  char *mReplyBuf = NULL;
-  int mReplyBufSize = 0;
-  int mReplyBufPos = 0;
-
-public:
-  MxCamSockClient(MxContext *mx, boost::asio::io_context &ioc)
-      : mMxCtx(mx), mIoContext(ioc), mClientSocket(ioc), mTimer(ioc) {
-    mLastActionTime = std::chrono::steady_clock::now();
-    mReplyBuf = (char *)malloc(32 * 1024 * 1024);
-    mReplyBufSize = 32 * 1024 * 1024;
-
-    int snd_buf_size = 2 * 1024 * 1024;
-    int recv_buf_size = 64 * 1024;
-    mClientSocket.set_option(
-        boost::asio::socket_base::send_buffer_size(snd_buf_size));
-    mClientSocket.set_option(
-        boost::asio::socket_base::receive_buffer_size(recv_buf_size));
-  }
-
-  ~MxCamSockClient() {
-    if (mReplyBuf) {
-      free(mReplyBuf);
-      mReplyBuf = NULL;
-    }
-  }
-
-  tcp::socket &get_socket() { return mClientSocket; }
-
-  void start() {
-    start_timer();
-    start_read();
-  }
-
-  void stop() {
-    mTimer.cancel();
-    if (mClientSocket.is_open())
-      mClientSocket.close();
-    if (mReplyBuf) {
-      free(mReplyBuf);
-      mReplyBuf = NULL;
-    }
-  }
-
-private:
-  void start_timer() {
-    auto self(shared_from_this());
-    mTimer.expires_after(std::chrono::seconds(5));
-    mTimer.async_wait(boost::bind(&MxCamSockClient::on_timer, self,
-                                  boost::asio::placeholders::error));
-  }
-
-  void start_read() {
-    mClientSocket.async_read_some(
-        boost::asio::buffer(mRecvBuf, MAX_CMD_SIZE),
-        boost::bind(&MxCamSockClient::handle_read, shared_from_this(),
-                    boost::asio::placeholders::error,
-                    boost::asio::placeholders::bytes_transferred));
-  }
-
-  void on_timer(const boost::system::error_code &error) {
-    if (!error) {
-      auto now = std::chrono::steady_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-          now - mLastActionTime);
-      if (duration.count() > 5) {
-        ALOGE("MXCamEnc: client timeout");
-        stop();
-      } else {
-        start_timer();
-      }
-    }
-  }
-
-  void handle_read(const boost::system::error_code &error,
-                   std::size_t bytes_transferred) {
-    if (!error) {
-      mLastActionTime = std::chrono::steady_clock::now();
-      ALOGD("MXCamEnc: read %d bytes from client: %s\n", bytes_transferred,
-            mRecvBuf);
-      char *reply = NULL;
-      int reply_size = 0;
-      if (handle_command(mRecvBuf, &reply, &reply_size) < 0) {
-        ALOGE("MXCamEnc: handle command failed");
-        stop();
-        return;
-      }
-
-      static char reply_header[16] = {0};
-      if (reply_size > 0) {
-        snprintf(reply_header, sizeof(reply_header), "%08xok:", reply_size + 3);
-      } else {
-        snprintf(reply_header, sizeof(reply_header), "00000003ok\0");
-      }
-
-      std::vector<boost::asio::const_buffer> reply_buffers;
-      reply_buffers.push_back(boost::asio::buffer(reply_header, 11));
-      if (reply_size > 0) {
-        reply_buffers.push_back(boost::asio::buffer(reply, reply_size));
-      }
-
-      auto self(shared_from_this());
-      boost::asio::async_write(
-          mClientSocket, reply_buffers,
-          [self, this, reply,
-           reply_size](const boost::system::error_code &error,
-                       std::size_t bytes_transferred) {
-            if (!error) {
-              ALOGD("MxCamClient: handle_command reply %d bytes to client: "
-                    "%s, reading next command",
-                    bytes_transferred, mRecvBuf);
-              start_read();
-            } else {
-              ALOGE("MXCamEnc: write failed %s", error.message().c_str());
-              stop();
-            }
-          });
-    } else {
-      ALOGE("MXCamEnc: read failed %s", error.message().c_str());
-      stop();
-    }
-  }
-
-  int handle_command(const char *command, char **reply, int *reply_size) {
-    static const char _cmd_start[] = "start";
-    static const char _cmd_stop[] = "stop";
-    static const char _cmd_query_vframe[] = "vframe";
-    char query_name[64];
-    const char *query_param = NULL;
-
-    *reply = NULL;
-    *reply_size = 0;
-
-    if (_parse_query((const char *)command, query_name, sizeof(query_name),
-                     &query_param)) {
-      ALOGE("parse query failed");
-      return -1;
-    }
-
-    if (strcmp(query_name, _cmd_start) == 0) {
-      snprintf(mReplyBuf, mReplyBufSize - 1,
-               "dim=%dx%d pix=%d"
-               " fps=%d bitrate=%d",
-               mMxCtx->video_width, mMxCtx->video_height, mMxCtx->video_format,
-               mMxCtx->video_fps, mMxCtx->video_bitrate);
-      *reply = mReplyBuf;
-      *reply_size = strlen(mReplyBuf);
-      ALOGD("MXCamEnc: start video stream %s", mReplyBuf);
-      return 0;
-    } else if (strcmp(query_name, _cmd_stop) == 0) {
-      return 0;
-    } else if (strcmp(query_name, _cmd_query_vframe) == 0) {
-
-      AVFrame *frame = MxCamFrameCache::getInstance()->getVideoFrame();
-      if (!frame) {
-        ALOGE("MxCamClient: get frame from packet failed");
-        return -1;
-      }
-
-      int frameSize = av_image_get_buffer_size((AVPixelFormat)frame->format,
-                                               frame->width, frame->height, 1);
-
-      if (frameSize > mReplyBufSize) {
-        if (mReplyBuf) {
-          free(mReplyBuf);
-        }
-        mReplyBuf = (char *)malloc(frameSize);
-        mReplyBufSize = frameSize;
-      }
-
-      int bytesCopied = av_image_copy_to_buffer(
-          (uint8_t *)mReplyBuf, frameSize, frame->data, frame->linesize,
-          (AVPixelFormat)frame->format, frame->width, frame->height, 1);
-
-      av_frame_free(&frame);
-
-      if (bytesCopied != frameSize) {
-        ALOGE("MXCamEnc: copy video frame failed");
-        return -1;
-      }
-
-      *reply = mReplyBuf;
-      *reply_size = frameSize;
-      return 0;
-    }
-
-    ALOGE("unknow cmd:%s", command);
-    return -1;
-  }
-};
-
-class MxCamSockServer {
-private:
-  MxContext *mMxCtx;
-  boost::asio::io_context mIoContext;
-  boost::asio::ip::tcp::acceptor mAcceptor;
-
-public:
-  MxCamSockServer(MxContext *mx, const char *listen_ip, int port)
-      : mMxCtx(mx),
-        mAcceptor(mIoContext,
-                  boost::asio::ip::tcp::endpoint(
-                      boost::asio::ip::make_address(listen_ip), port)) {}
-
-  void run() {
-    start_accept();
-    mIoContext.run();
-  }
-  void stop() { mAcceptor.close(); }
-
-private:
-  void start_accept() {
-    boost::shared_ptr<MxCamSockClient> client(
-        new MxCamSockClient(mMxCtx, mIoContext));
-    mAcceptor.async_accept(
-        client->get_socket(),
-        [this, client](const boost::system::error_code &error) {
-          if (error) {
-            ALOGE("MXCamEnc: accept failed %s", error.message().c_str());
-            return;
-          }
-          client->start();
-          start_accept();
-          ALOGD("MxCamServer: client incomed!!");
-        });
-  }
-};
 
 /*
 * https://man7.org/linux/man-pages/man3/mkfifo.3.html
@@ -1073,7 +840,7 @@ public:
       return -1;
     }
 
-    ALOGD("%s run_once command: %s", get_pipe_name(), cmd);
+    // ALOGD("%s run_once command: %s", get_pipe_name(), cmd);
     char *reply = NULL;
     int reply_size = 0;
     ret = handle_command(cmd, &reply, &reply_size);
@@ -1089,7 +856,7 @@ public:
       snprintf(reply_header, sizeof(reply_header), "00000003ok\0");
     }
 
-    ALOGD("%s run_once try reply_header: %s", get_pipe_name(), reply_header);
+    // ALOGD("%s run_once try reply_header: %s", get_pipe_name(), reply_header);
 
     ret = pipe_write_data(mWtFd, reply_header, 11, timeout_ms);
     if (ret < 0 || ret != 11) {
@@ -1097,8 +864,8 @@ public:
       return -1;
     }
     if (reply_size > 0) {
-      ALOGD("%s run_once try reply data: %d bytes", get_pipe_name(),
-            reply_size);
+      // ALOGD("%s run_once try reply data: %d bytes", get_pipe_name(),
+      //       reply_size);
       ret = pipe_write_data(mWtFd, reply, reply_size, timeout_ms);
       if (ret < 0 || ret != reply_size) {
         ALOGE("%s write data(%d bytes) failed %d", get_pipe_name(), reply_size,
@@ -1106,7 +873,7 @@ public:
         return -1;
       }
     }
-    ALOGD("%s run_once ok", get_pipe_name());
+    // ALOGD("%s run_once ok", get_pipe_name());
     return 0;
   }
 
@@ -1388,14 +1155,15 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
     AVCodecParameters *par = s1->streams[pkt->stream_index]->codecpar;
-    MxCamFrameCache::getInstance()->add_audio_frame(par, pkt->data, pkt->size);
+    MxCamFrameCache::getInstance()->add_audio_frame(mx, par, pkt, pkt->data,
+                                                    pkt->size);
     // get bytes in 1 second
 
     return 0;
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
-      return mxcam_add_video_packet(mx, (AVFrame *)pkt->data);
+      return mxcam_add_video_packet(mx, par, pkt, (AVFrame *)pkt->data);
     }
   }
   ALOGE("MXCamEnc: unknown stream index %d\n", pkt->stream_index);

@@ -95,11 +95,15 @@ typedef struct {
   int video_format;
   int video_fps;
   int video_bitrate;
+  AVRational video_time_base;
+  int64_t video_start_time;
 
   int audio_sample_rate;
   int audio_channels;
   int audio_format;
   int audio_bitrate;
+  AVRational audio_time_base;
+  int64_t audio_start_time;
 
   pthread_t video_io_worker;
   pthread_t audio_io_worker;
