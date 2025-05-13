@@ -25,3 +25,7 @@ netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 conn
 
 
 .\bin\ffmpeg -re -stream_loop -1 -i 云手机设置推流-01.mp4 -vf "scale=1072:-1" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f flv rtmp://47.100.44.74/myapp/ec2a15d
+
+
+
+./ffmpeg -loglevel warning -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 1 -
