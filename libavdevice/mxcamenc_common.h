@@ -78,6 +78,7 @@ typedef struct {
   void *ctx;
   /*options*/
   int phone;
+  char *pipe_path;
   int listen_port;
   char *listen_ip;
 

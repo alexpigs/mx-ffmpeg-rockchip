@@ -26,7 +26,7 @@
 static int write_header(AVFormatContext *s1) {
   MxContext *mx = s1->priv_data;
 
-  ALOGD("MXCamEnc: write_header url=%s,phone=%d\n", s1->url, mx->phone);
+  ALOGD("MXCamEnc: write_header url=%s,phone=%d,pipe_path=%s\n", s1->url, mx->phone, mx->pipe_path);
 
   mx->audio_stream_idx = -1;
   mx->video_stream_idx = -1;
@@ -96,6 +96,16 @@ static const AVOption options[] = {{"phone",
                                     {.i64 = 0},
                                     INT_MIN,
                                     INT_MAX,
+                                    AV_OPT_FLAG_ENCODING_PARAM},
+
+                                    
+                                   {"pipe_path",
+                                    "set pipe_path",
+                                    OFFSET(pipe_path),
+                                    AV_OPT_TYPE_STRING,
+                                    {.str = "phone/mxdroid/device/camera"},
+                                    0,
+                                    0,
                                     AV_OPT_FLAG_ENCODING_PARAM},
 
                                    {"listen_ip",

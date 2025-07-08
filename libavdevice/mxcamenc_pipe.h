@@ -4,17 +4,13 @@
 #include "mxcamenc_common.h"
 
 #define VCTRL_FILE                                                             \
-  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
-  "camera.ctl"
+  "/mnt/data/mxdroid/containers/%d/%s/camera.ctl"
 #define VREPLY_FILE                                                            \
-  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
-  "camera.reply"
+  "/mnt/data/mxdroid/containers/%d/%s/camera.reply"
 #define ACRTL_FILE                                                             \
-  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
-  "audio.ctl"
+  "/mnt/data/mxdroid/containers/%d/%s/audio.ctl"
 #define AREPLY_FILE                                                            \
-  "/mnt/data/mxdroid/containers/%d/phone/data/misc/.mxdroid/device/camera/"    \
-  "audio.reply"
+  "/mnt/data/mxdroid/containers/%d/%s/audio.reply"
 
 #ifdef __cplusplus
 extern "C" {

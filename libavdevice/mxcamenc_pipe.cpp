@@ -1116,8 +1116,8 @@ int mxcam_start_server(MxContext *mx) {
   char wt_file[256];
 
   // create audio pipe
-  snprintf(rd_file, sizeof(rd_file), ACRTL_FILE, phone);
-  snprintf(wt_file, sizeof(wt_file), AREPLY_FILE, phone);
+  snprintf(rd_file, sizeof(rd_file), ACRTL_FILE, phone, mx->pipe_path);
+  snprintf(wt_file, sizeof(wt_file), AREPLY_FILE, phone, mx->pipe_path);
 
   ALOGD("audiopipe_threadfunc rd_file=%s wt_file=%s", rd_file, wt_file);
   MxCamAudioPipe *pipe = new MxCamAudioPipe(mx, rd_file, wt_file);
@@ -1131,8 +1131,8 @@ int mxcam_start_server(MxContext *mx) {
   ALOGD("audiopipe_threadfunc create %d\n", mx->phone);
 
   // create video pipe
-  snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone);
-  snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone);
+  snprintf(rd_file, sizeof(rd_file), VCTRL_FILE, phone, mx->pipe_path);
+  snprintf(wt_file, sizeof(wt_file), VREPLY_FILE, phone, mx->pipe_path);
 
   ALOGD("videopipe_threadfunc rd_file=%s wt_file=%s", rd_file, wt_file);
   MxCamVideoPipe *vpipe = new MxCamVideoPipe(mx, rd_file, wt_file);

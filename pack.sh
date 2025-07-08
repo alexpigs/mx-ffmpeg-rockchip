@@ -19,7 +19,7 @@ done
 
 # copy v2c
 mkdir ./deb/usr/bin 
-cp ./ffmeg ./deb/usr/bin/
+cp ./ffmpeg ./deb/usr/bin/
 
 #tar
 cd ./deb/usr
