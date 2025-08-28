@@ -565,15 +565,16 @@ public:
   }
 };
 
+#define MAX_VIDEO_FRAME_CACHE 2
 #define AUDIO_BYTES_PER_SECOND (44100 * 2 * 2)
-#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 1)
+#define AUDIO_CACHE_SIZE (AUDIO_BYTES_PER_SECOND * 1 / 15)
+
 class MxCamFrameCache {
 public:
   static MxCamFrameCache *getInstance() {
     static MxCamFrameCache instance;
     return &instance;
   }
-#define MAX_VIDEO_FRAME_CACHE 30
 
 private:
   std::mutex mMxCacheMutex; // 音视频共用锁, 调试用
