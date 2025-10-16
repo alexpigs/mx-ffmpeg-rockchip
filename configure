@@ -5757,6 +5757,7 @@ fi
 
 add_cppflags -D_ISOC11_SOURCE
 add_cxxflags -D__STDC_CONSTANT_MACROS
+check_cxxflags -std=c++17 || check_cxxflags -std=c++0x
 check_cxxflags_cc -std=$stdcxx ctype.h "__cplusplus >= 201103L" ||
     { check_cxxflags -std=c++11 && stdcxx="c++11" || { check_cxxflags -std=c++0x && stdcxx="c++0x"; }; }
 
@@ -6060,6 +6061,7 @@ case $target_os in
     linux)
         enable section_data_rel_ro
         enabled_any arm aarch64 && enable_weak linux_perf
+        add_extralibs -lstdc++
         ;;
     irix*)
         target_os=irix
@@ -6907,7 +6909,7 @@ if [ -z "$nvccflags" ]; then
     nvccflags=$nvccflags_default
 fi
 
-nvccflags="$nvccflags -std=c++11"
+nvccflags="$nvccflags -std=c++17"
 
 if enabled x86_64 || enabled ppc64 || enabled aarch64; then
     nvccflags="$nvccflags -m64"

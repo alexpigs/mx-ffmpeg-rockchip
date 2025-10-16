@@ -46,3 +46,7 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+
+/out/
+/deb/
+/mxffmpeg.tar
