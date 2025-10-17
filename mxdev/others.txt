@@ -1,9 +1,9 @@
 
 debug
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo  --enable-openssl --enable-libdatachannel
 
 releae
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-muxer=fifo --disable-sdl2 
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-muxer=fifo --disable-sdl2   --enable-openssl --enable-libdatachannel
 
 
 ./ffmpeg -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -vsync 2 -f null -
@@ -32,17 +32,8 @@ netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 conn
 
 
 
-sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i "webrtc://rtc.nestbox.top/live/livestream123?signal_url=http://rtc.nestbox.top:1985/rtc/v1/whep/?app=live&stream=livestream123&signal_use_json=1" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
+sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -f whep -i "webrtc://rtc.nestbox.top/live/livestream123" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
 
-./ffmpeg -loglevel warning -re -stream_loop -1 \
-         -hwaccel rkmpp -hwaccel_output_format drm_prime \
-         -f webrtc -webrtc_offer_path ./offer.sdp \
-         -webrtc_answer_path ./answer.sdp \
-         -timeout 30000 \
-         -i dummy \
-         -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" \
-         -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
-         -vsync 2 -f mxcam -phone 2 -
 
 
 

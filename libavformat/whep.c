@@ -424,7 +424,7 @@ redo:
     if (avio_open_dyn_buf(&dyn_bc) == 0) {
         int len;
         uint8_t *dyn_buf = NULL;
-        ff_rtp_send_rtcp_feedback(rtp_ctx, NULL, dyn_bc, 1);
+        ff_rtp_send_rtcp_feedback(rtp_ctx, NULL, dyn_bc);
         len = avio_close_dyn_buf(dyn_bc, &dyn_buf);
         if (len > 0 && dyn_buf && rtcSendMessage(msg->track, dyn_buf, len) < 0)
             av_log(s, AV_LOG_ERROR, "Failed to send RTCP feedback\n");
