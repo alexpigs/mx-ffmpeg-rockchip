@@ -39,7 +39,7 @@ void ff_whip_whep_init_rtc_logger(void);
  * @param[out] session_url The session url from Location header in response; must be freed using av_free().
  * @return 0 on success, a negative value on error.
  */
-int ff_whip_whep_exchange_and_set_sdp(AVFormatContext *s, int pc, const char *token, char **session_url);
+int ff_whip_whep_exchange_and_set_sdp(AVFormatContext *s, int pc, const char *token, char **session_url, const char *server_type);
 
 /**
  * Delete the session for the WHIP/WHEP.

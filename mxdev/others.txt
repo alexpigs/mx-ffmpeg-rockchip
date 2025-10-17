@@ -32,7 +32,7 @@ netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 conn
 
 
 
-sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -f whep -i "webrtc://rtc.nestbox.top/live/livestream123" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
+sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -f whep -server_type srs -i "webrtc://rtc.nestbox.top/live/livestream909" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
 
 
 

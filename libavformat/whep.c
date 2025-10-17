@@ -91,6 +91,7 @@ typedef struct Message {
 typedef struct WHEPContext {
     AVClass *class;
     char *token;
+    char *server_type;
     char *session_url;
     int64_t pli_period;
     int64_t last_pli_time;
@@ -320,7 +321,7 @@ static int whep_read_header(AVFormatContext *s)
         return AVERROR_EXTERNAL;
     }
 
-    return ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url);
+    return ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url, whep->server_type);
 }
 
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
@@ -527,6 +528,8 @@ static int whep_read_close(AVFormatContext *s)
 static const AVOption whep_options[] = {
     { "token", "set token to send in the Authorization header as \"Bearer <token>\"",
         OFFSET(token), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
+    { "server_type", "set server type (standard or srs)",
+        OFFSET(server_type), AV_OPT_TYPE_STRING, { .str = "standard" }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
     { "pli_period", "set interval in seconds for sending periodic PLI (Picture Loss Indication) requests; 0 to disable",
         OFFSET(pli_period), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { NULL }
