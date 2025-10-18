@@ -63,12 +63,12 @@ sudo ./ffmpeg_g -loglevel error \
   -vsync 2 \
   -f mxcam -phone 2 -
 
-# 低延迟优化版本（推荐）+ PTS 平滑
+# 低延迟优化版本（推荐）+ PTS 平滑 + 帧率控制
 sudo ./ffmpeg_g -loglevel error \
   -probesize 32K -analyzeduration 0 \
   -fflags nobuffer -flags low_delay \
   -hwaccel rkmpp -hwaccel_output_format drm_prime \
-  -reorder_queue_size 30 -smooth_pts 1 \
+  -reorder_queue_size 30 -smooth_pts 1 -frame_repeat 1 \
   -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
   -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" \
   -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \

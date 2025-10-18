@@ -115,7 +115,7 @@ typedef struct WHEPContext {
     AVPacket *audio_pkt;
     AVPacket *video_pkt;
 
-    // PTS smoothing for stable frame rate
+    // PTS smoothing and frame rate control
     int64_t video_pts_base;
     int64_t video_frame_count;
     int64_t expected_frame_duration;  // in RTP clock units (90kHz for video)
@@ -125,6 +125,13 @@ typedef struct WHEPContext {
     int64_t audio_pts_base;
     int64_t audio_frame_count;
     int64_t last_audio_rtp_ts;
+    
+    // Real-time clock-based frame rate control
+    int64_t start_time;           // av_gettime_relative() when first packet received
+    int64_t last_output_time;     // last time we output a packet
+    int64_t target_frame_interval; // microseconds between frames (1000000/fps)
+    AVPacket *last_video_frame;   // for frame repeat on loss
+    int enable_frame_repeat;      // repeat last frame on packet loss
 } WHEPContext;
 
 static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_type)
@@ -334,6 +341,13 @@ static int whep_read_header(AVFormatContext *s)
     whep->audio_pts_base = AV_NOPTS_VALUE;
     whep->audio_frame_count = 0;
     whep->last_audio_rtp_ts = AV_NOPTS_VALUE;
+    
+    // 初始化实时时钟控制
+    whep->start_time = 0;
+    whep->last_output_time = 0;
+    whep->target_frame_interval = 33333;  // 默认 30fps = 33.333ms
+    whep->last_video_frame = NULL;
+    whep->enable_frame_repeat = 1;  // 默认启用帧重复
     
     // 浏览器模式：如果用户没有手动设置，自动降低探测要求以快速启动
     // 检查是否为用户设置：probesize 默认 5MB，analyzeduration 默认 0 或 5000000
@@ -603,79 +617,142 @@ redo:
             goto redo;
         }
     } else if (msg->track == whep->video_track) {
+        // 实时时钟节流：按固定帧率输出，避免网络抖动影响
+        int64_t now = av_gettime_relative();
+        
+        if (whep->start_time == 0) {
+            // 首次接收，建立时间基准
+            whep->start_time = now;
+            whep->last_output_time = now;
+        } else {
+            // 计算距离上次输出的时间
+            int64_t elapsed = now - whep->last_output_time;
+            
+            // 如果还没到输出时间，等待
+            if (elapsed < whep->target_frame_interval) {
+                int64_t wait_time = whep->target_frame_interval - elapsed;
+                av_log(s, AV_LOG_DEBUG, "[WHEP] ⏰ 等待 %.1fms 以维持帧率\n", wait_time / 1000.0);
+                av_usleep(wait_time);
+                now = av_gettime_relative();
+            }
+        }
+        
         // 浏览器模式：即使没有完整信息也尝试输出视频包
         if (whep->video_pkt && whep->video_pkt->size > 0) {
             // 对于 H.264，如果还没有 extradata，尝试从包中提取 SPS/PPS
             AVStream *st = rtp_ctx->st;
-            if (st && st->codecpar->codec_id == AV_CODEC_ID_H264 && 
-                st->codecpar->extradata_size == 0 && whep->video_pkt->size > 4) {
-                
-                // 查找所有 NAL 单元
+            if (st && st->codecpar->codec_id == AV_CODEC_ID_H264) {
                 uint8_t *data = whep->video_pkt->data;
                 int size = whep->video_pkt->size;
-                uint8_t *sps = NULL, *pps = NULL;
-                int sps_size = 0, pps_size = 0;
                 
-                for (int i = 0; i < size - 4; i++) {
-                    // 查找起始码 0x00000001 或 0x000001
-                    if (data[i] == 0 && data[i+1] == 0) {
-                        int nal_start = -1;
-                        if (data[i+2] == 1) {
-                            nal_start = i + 3;
-                        } else if (data[i+2] == 0 && data[i+3] == 1) {
-                            nal_start = i + 4;
-                            i++;
-                        }
-                        
-                        if (nal_start > 0 && nal_start < size) {
-                            uint8_t nal_type = data[nal_start] & 0x1F;
-                            
-                            // 查找 NAL 单元结束位置
-                            int nal_end = size;
-                            for (int j = nal_start + 1; j < size - 2; j++) {
-                                if (data[j] == 0 && data[j+1] == 0 && (data[j+2] == 1 || data[j+2] == 0)) {
-                                    nal_end = j;
-                                    break;
-                                }
-                            }
-                            
-                            if (nal_type == 7) { // SPS
-                                sps = data + nal_start;
-                                sps_size = nal_end - nal_start;
-                            } else if (nal_type == 8) { // PPS
-                                pps = data + nal_start;
-                                pps_size = nal_end - nal_start;
-                            }
-                        }
+                // 检查是否有 NAL 单元
+                if (size > 4) {
+                    // 打印前几个字节用于调试
+                    av_log(s, AV_LOG_DEBUG, "[WHEP] 🔍 H.264 包前16字节: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                           data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                           data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
+                    
+                    // 检查第一个 NAL 类型
+                    uint8_t first_nal_type = 0;
+                    if (data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
+                        first_nal_type = data[4] & 0x1F;
+                        av_log(s, AV_LOG_DEBUG, "[WHEP] 🔍 首个 NAL 类型: %d (起始码: 00 00 00 01)\n", first_nal_type);
+                    } else if (data[0] == 0 && data[1] == 0 && data[2] == 1) {
+                        first_nal_type = data[3] & 0x1F;
+                        av_log(s, AV_LOG_DEBUG, "[WHEP] 🔍 首个 NAL 类型: %d (起始码: 00 00 01)\n", first_nal_type);
+                    } else {
+                        av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 未找到 NAL 起始码！包可能损坏或格式错误\n");
                     }
                 }
                 
-                // 如果找到了 SPS 和 PPS，构建 extradata (avcC 格式)
-                if (sps && pps && sps_size > 0 && pps_size > 0) {
-                    int extradata_size = 8 + sps_size + 1 + 2 + pps_size;
-                    uint8_t *extradata = av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
-                    if (extradata) {
-                        uint8_t *p = extradata;
-                        *p++ = 1; // configurationVersion
-                        *p++ = sps[1]; // AVCProfileIndication
-                        *p++ = sps[2]; // profile_compatibility
-                        *p++ = sps[3]; // AVCLevelIndication
-                        *p++ = 0xFF; // lengthSizeMinusOne (4 bytes)
-                        *p++ = 0xE1; // numOfSequenceParameterSets
-                        *p++ = (sps_size >> 8) & 0xFF;
-                        *p++ = sps_size & 0xFF;
-                        memcpy(p, sps, sps_size);
-                        p += sps_size;
-                        *p++ = 1; // numOfPictureParameterSets
-                        *p++ = (pps_size >> 8) & 0xFF;
-                        *p++ = pps_size & 0xFF;
-                        memcpy(p, pps, pps_size);
-                        
-                        st->codecpar->extradata = extradata;
-                        st->codecpar->extradata_size = extradata_size;
-                        
-                        av_log(s, AV_LOG_INFO, "[WHEP] ✅ 从视频包中提取到 SPS/PPS: sps_size=%d, pps_size=%d, extradata_size=%d\n",
-                               sps_size, pps_size, extradata_size);
+                // 只在没有 extradata 时提取
+                if (st->codecpar->extradata_size == 0 && size > 4) {
+                    // 查找所有 NAL 单元
+                    uint8_t *sps = NULL, *pps = NULL;
+                    int sps_size = 0, pps_size = 0;
+                    int found_nal_count = 0;
+                    
+                    for (int i = 0; i < size - 4; i++) {
+                        // 查找起始码 0x00000001 或 0x000001
+                        if (data[i] == 0 && data[i+1] == 0) {
+                            int nal_start = -1;
+                            if (data[i+2] == 1) {
+                                nal_start = i + 3;
+                            } else if (data[i+2] == 0 && data[i+3] == 1) {
+                                nal_start = i + 4;
+                                i++;
+                            }
+                            
+                            if (nal_start > 0 && nal_start < size) {
+                                uint8_t nal_type = data[nal_start] & 0x1F;
+                                found_nal_count++;
+                                
+                                // 查找 NAL 单元结束位置
+                                int nal_end = size;
+                                for (int j = nal_start + 1; j < size - 2; j++) {
+                                    if (data[j] == 0 && data[j+1] == 0 && (data[j+2] == 1 || data[j+2] == 0)) {
+                                        nal_end = j;
+                                        break;
+                                    }
+                                }
+                                
+                                av_log(s, AV_LOG_DEBUG, "[WHEP] 🔍 找到 NAL 类型 %d, 大小: %d 字节\n", 
+                                       nal_type, nal_end - nal_start);
+                                
+                                if (nal_type == 7) { // SPS
+                                    sps = data + nal_start;
+                                    sps_size = nal_end - nal_start;
+                                    av_log(s, AV_LOG_INFO, "[WHEP] 🎯 找到 SPS: 大小=%d 字节\n", sps_size);
+                                } else if (nal_type == 8) { // PPS
+                                    pps = data + nal_start;
+                                    pps_size = nal_end - nal_start;
+                                    av_log(s, AV_LOG_INFO, "[WHEP] 🎯 找到 PPS: 大小=%d 字节\n", pps_size);
+                                }
+                            }
+                        }
+                    }
+                    
+                    av_log(s, AV_LOG_DEBUG, "[WHEP] 🔍 共找到 %d 个 NAL 单元\n", found_nal_count);
+                    
+                    // 如果找到了 SPS 和 PPS，构建 extradata (avcC 格式)
+                    if (sps && pps && sps_size > 0 && pps_size > 0) {
+                        int extradata_size = 8 + sps_size + 1 + 2 + pps_size;
+                        uint8_t *extradata = av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                        if (extradata) {
+                            uint8_t *p = extradata;
+                            *p++ = 1; // configurationVersion
+                            *p++ = sps[1]; // AVCProfileIndication
+                            *p++ = sps[2]; // profile_compatibility
+                            *p++ = sps[3]; // AVCLevelIndication
+                            *p++ = 0xFF; // lengthSizeMinusOne (4 bytes)
+                            *p++ = 0xE1; // numOfSequenceParameterSets
+                            *p++ = (sps_size >> 8) & 0xFF;
+                            *p++ = sps_size & 0xFF;
+                            memcpy(p, sps, sps_size);
+                            p += sps_size;
+                            *p++ = 1; // numOfPictureParameterSets
+                            *p++ = (pps_size >> 8) & 0xFF;
+                            *p++ = pps_size & 0xFF;
+                            memcpy(p, pps, pps_size);
+                            
+                            st->codecpar->extradata = extradata;
+                            st->codecpar->extradata_size = extradata_size;
+                            
+                            av_log(s, AV_LOG_INFO, "[WHEP] ✅ 从视频包中提取到 SPS/PPS: sps_size=%d, pps_size=%d, extradata_size=%d\n",
+                                   sps_size, pps_size, extradata_size);
+                            
+                            // 打印 extradata 的前几个字节
+                            av_log(s, AV_LOG_INFO, "[WHEP] extradata 前16字节: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                   extradata[0], extradata[1], extradata[2], extradata[3],
+                                   extradata[4], extradata[5], extradata[6], extradata[7],
+                                   extradata[8], extradata[9], extradata[10], extradata[11],
+                                   extradata[12], extradata[13], extradata[14], extradata[15]);
+                        }
+                    } else if (found_nal_count > 0) {
+                        av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 找到 %d 个 NAL，但未找到完整的 SPS/PPS (SPS: %s, PPS: %s)\n",
+                               found_nal_count,
+                               sps ? "有" : "无",
+                               pps ? "有" : "无");
                     }
                 }
             }
@@ -723,6 +800,20 @@ redo:
                 
                 whep->video_frame_count++;
                 whep->last_video_rtp_ts = original_pts;
+            }
+            
+            // 更新输出时间
+            whep->last_output_time = now;
+            
+            // 备份当前帧用于可能的重复（未来实现）
+            if (whep->enable_frame_repeat) {
+                if (!whep->last_video_frame) {
+                    whep->last_video_frame = av_packet_alloc();
+                }
+                if (whep->last_video_frame) {
+                    av_packet_unref(whep->last_video_frame);
+                    av_packet_ref(whep->last_video_frame, pkt);
+                }
             }
             
             av_log(s, AV_LOG_INFO, "[WHEP] 🎥 输出视频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
@@ -787,6 +878,8 @@ static int whep_read_close(AVFormatContext *s)
         av_packet_free(&whep->audio_pkt);
     if (whep->video_pkt)
         av_packet_free(&whep->video_pkt);
+    if (whep->last_video_frame)
+        av_packet_free(&whep->last_video_frame);
 
     if (whep->session_url) {
         ff_whip_whep_delete_session(s, whep->token, whep->session_url);
@@ -808,6 +901,10 @@ static const AVOption whep_options[] = {
         OFFSET(reorder_queue_size), AV_OPT_TYPE_INT, { .i64 = 10 }, 0, 500, AV_OPT_FLAG_DECODING_PARAM },
     { "smooth_pts", "enable PTS smoothing for stable frame rate (0=disable, 1=enable, default: 1)",
         OFFSET(smooth_pts), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "frame_repeat", "enable frame repeat on packet loss to avoid stuttering (0=disable, 1=enable, default: 1)",
+        OFFSET(enable_frame_repeat), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+    { "target_fps", "target frame rate for output throttling (default: 30)",
+        OFFSET(target_frame_interval), AV_OPT_TYPE_INT, { .i64 = 33333 }, 10000, 100000, AV_OPT_FLAG_DECODING_PARAM },
     { NULL }
 };
 
