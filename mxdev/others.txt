@@ -32,9 +32,18 @@ netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 conn
 
 
 
-sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -f whep -server_type srs -i "webrtc://rtc.nestbox.top/live/livestream909" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
+sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -f whep -server_type srs -i "webrtc://rtc.nestbox.top/live/livestream" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
 
+sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -f whep -server_type srs -i "webrtc://rtc.nestbox.top/live/livestream" -vf "scale=w=1072:h=-1:flags=bilinear,format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
 
+sudo ./ffmpeg_g  -loglevel warning -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime \
+  -f whep \
+  -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
+  -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" \
+  -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
+  -vsync 2 \
+  -pix_fmt drm_prime \
+  -f mxcam -phone 2 -
 
 
 https://github.com/paullouisageneau/libdatachannel/blob/master/README.md
@@ -43,3 +52,24 @@ https://github.com/paullouisageneau/libdatachannel/blob/master/README.md
 （可将生成器改成 Unix Makefiles，但 Ninja 构建更快；若需要特定依赖选项，可在此追加 -DUSE_GNUTLS=ON、-DUSE_EXTERNAL_USRSCTP=ON 等。）
 运行构建：cmake --build . -j$(nproc)，完成后在 build-static/lib/ 目录下会得到 libdatachannel.a 以及依赖的静态库（libjuice.a、libsrtp2.a 等）。
 若需要安装到系统目录，可使用 cmake --install . --prefix /usr/local；否则直接把生成的 .a 文件和对应头文件加入 FFmpeg 的静态链接路径即可。
+
+sudo ./ffmpeg_g -loglevel error \
+  -probesize 10M -analyzeduration 5000000 \
+  -hwaccel rkmpp -hwaccel_output_format drm_prime \
+  -re -stream_loop -1 \
+  -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
+  -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" \
+  -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
+  -vsync 2 \
+  -f mxcam -phone 2 -
+
+# 低延迟优化版本（推荐）
+sudo ./ffmpeg_g -loglevel error \
+  -probesize 32K -analyzeduration 0 \
+  -fflags nobuffer -flags low_delay \
+  -hwaccel rkmpp -hwaccel_output_format drm_prime \
+  -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
+  -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" \
+  -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
+  -vsync 2 \
+  -f mxcam -phone 2 -

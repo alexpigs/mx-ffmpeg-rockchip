@@ -23,6 +23,7 @@
 #include <stdatomic.h>
 #include <limits.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "avformat.h"
 #include "demux.h"
@@ -95,6 +96,7 @@ typedef struct WHEPContext {
     char *session_url;
     int64_t pli_period;
     int64_t last_pli_time;
+    int reorder_queue_size;
 
     // libdatachannel state
     int pc;
@@ -217,10 +219,17 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
             int track_id = (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ?
                            whep->audio_track : whep->video_track;
             if (whep_get_sdp_a_line(track_id, line, sizeof(line), payload_type) < 0) {
-                av_log(s, AV_LOG_WARNING, "No SDP a-line for payload type %d\n", payload_type);
+                av_log(s, AV_LOG_INFO, "[WHEP] ⚠️ 未找到 payload %d 的 SDP a-line，将依赖实际数据解析（类似浏览器模式）\n", payload_type);
             } else {
+                av_log(s, AV_LOG_INFO, "[WHEP] 解析 SDP a-line (payload %d): %s\n", payload_type, line);
                 handler->parse_sdp_a_line(s, st->index, dynamic_protocol_context, line);
             }
+        }
+        
+        // 浏览器模式：标记为需要完整解析，允许从实际数据中提取 codec 信息
+        if (st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_H265) {
+            ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL;
+            av_log(s, AV_LOG_INFO, "[WHEP] 🌐 启用浏览器模式：视频流将从实际数据中解析 codec 信息\n");
         }
     }
 
@@ -245,6 +254,19 @@ static void message_callback(int id, const char *message, int size, void *ptr)
 
     if ((RTP_PT_IS_RTCP(message[1]) && size < 8) || size < 12)
         return;
+
+    // 打印接收到的消息信息
+    if (RTP_PT_IS_RTCP(message[1])) {
+        av_log(whep, AV_LOG_INFO, "[WHEP] 接收到 RTCP 包: track_id=%d, 类型=0x%02x, 大小=%d 字节\n",
+               id, message[1], size);
+    } else {
+        uint8_t payload_type = message[1] & 0x7f;
+        uint16_t seq_num = (message[2] << 8) | message[3];
+        uint32_t timestamp = (message[4] << 24) | (message[5] << 16) | (message[6] << 8) | message[7];
+        uint32_t ssrc = (message[8] << 24) | (message[9] << 16) | (message[10] << 8) | message[11];
+        av_log(whep, AV_LOG_INFO, "[WHEP] 接收到 RTP 包: track_id=%d, payload_type=%d, 序列号=%u, 时间戳=%u, SSRC=0x%08x, 大小=%d 字节\n",
+               id, payload_type, seq_num, timestamp, ssrc, size);
+    }
 
     // Push packet to ring buffer
     msg = av_malloc(sizeof(Message));
@@ -282,7 +304,29 @@ static int whep_read_header(AVFormatContext *s)
     rtcConfiguration config = {0};
 
     ff_whip_whep_init_rtc_logger();
+    
+    // WHEP 流是异步创建的（接收到第一个 RTP 包时），需要设置 NOHEADER
     s->ctx_flags |= AVFMTCTX_NOHEADER;
+
+    // 确保 PLI 相关字段初始化为 0
+    whep->last_pli_time = 0;
+    
+    // 浏览器模式：如果用户没有手动设置，自动降低探测要求以快速启动
+    // 检查是否为用户设置：probesize 默认 5MB，analyzeduration 默认 0 或 5000000
+    int probesize_default = (s->probesize <= 5000000);  // <= 5MB 认为是默认或用户想要快速启动
+    int analyze_default = (s->max_analyze_duration == 0 || s->max_analyze_duration == 5000000);
+    
+    if (probesize_default && s->probesize > 500000) {
+        s->probesize = 500000;  // 减少到 500KB
+        av_log(s, AV_LOG_INFO, "[WHEP] 🌐 浏览器模式：降低 probesize 到 %d (原值: %d)\n", 
+               s->probesize, 5000000);
+    }
+    if (analyze_default && s->max_analyze_duration != 1000000) {
+        int64_t old_value = s->max_analyze_duration;
+        s->max_analyze_duration = 1000000;  // 减少到 1 秒
+        av_log(s, AV_LOG_INFO, "[WHEP] 🌐 浏览器模式：降低 analyzeduration 到 %lld (原值: %lld)\n", 
+               s->max_analyze_duration, old_value);
+    }
 
     whep->capacity = 1024;
     whep->buffer = av_calloc(whep->capacity, sizeof(*whep->buffer));
@@ -404,8 +448,19 @@ redo:
                 }
             }
             if (ret == 0) {
-                av_log(s, AV_LOG_DEBUG, "Create RTP context for payload type %d\n", payload_type);
+                av_log(s, AV_LOG_INFO, "[WHEP] 创建 RTP context for payload type %d\n", payload_type);
                 rtp_ctx = whep_new_rtp_context(s, payload_type);
+                if (rtp_ctx && rtp_ctx->st) {
+                    AVCodecParameters *par = rtp_ctx->st->codecpar;
+                    av_log(s, AV_LOG_INFO, "[WHEP] RTP context 创建成功: codec=%s, extradata_size=%d\n",
+                           avcodec_get_name(par->codec_id), par->extradata_size);
+                    if (par->extradata_size > 0 && par->extradata) {
+                        av_log(s, AV_LOG_INFO, "[WHEP] extradata 前16字节:");
+                        for (int i = 0; i < FFMIN(16, par->extradata_size); i++)
+                            av_log(s, AV_LOG_INFO, " %02x", par->extradata[i]);
+                        av_log(s, AV_LOG_INFO, "\n");
+                    }
+                }
             }
         }
     }
@@ -420,6 +475,28 @@ redo:
         ret = ff_rtp_parse_packet(rtp_ctx, whep->audio_pkt, (uint8_t **)&msg->data, msg->size) < 0;
     else if (msg->track == whep->video_track)
         ret = ff_rtp_parse_packet(rtp_ctx, whep->video_pkt, (uint8_t **)&msg->data, msg->size) < 0;
+
+    // 首次收到视频包时，立即发送 PLI 请求关键帧（带 SPS/PPS）
+    if (msg->track == whep->video_track) {
+        if (rtp_ctx->ssrc && whep->last_pli_time == 0) {
+            uint32_t source_ssrc = rtp_ctx->ssrc;
+            uint32_t sender_ssrc = source_ssrc + 1;
+            uint8_t pli_packet[] = {
+                (RTP_VERSION << 6) | 1, RTCP_PSFB,         0x00,             0x02,
+                sender_ssrc >> 24,      sender_ssrc >> 16, sender_ssrc >> 8, sender_ssrc,
+                source_ssrc >> 24,      source_ssrc >> 16, source_ssrc >> 8, source_ssrc,
+            };
+            if (rtcSendMessage(msg->track, pli_packet, sizeof(pli_packet)) < 0)
+                av_log(s, AV_LOG_ERROR, "[WHEP] 首次发送 PLI 失败\n");
+            else {
+                av_log(s, AV_LOG_INFO, "[WHEP] ✅ 首次发送 PLI 请求关键帧 (SSRC=0x%08x)\n", source_ssrc);
+                whep->last_pli_time = av_gettime_relative();
+            }
+        } else {
+            av_log(s, AV_LOG_DEBUG, "[WHEP] PLI 条件不满足: ssrc=0x%08x, last_pli_time=%lld\n", 
+                   rtp_ctx->ssrc, whep->last_pli_time);
+        }
+    }
 
     // Send RTCP feedback
     if (avio_open_dyn_buf(&dyn_bc) == 0) {
@@ -456,11 +533,103 @@ redo:
         goto redo;
 
     if (msg->track == whep->audio_track) {
-        av_packet_ref(pkt, whep->audio_pkt);
-        av_packet_free(&whep->audio_pkt);
+        // 浏览器模式：即使没有完整信息也尝试输出音频包
+        if (whep->audio_pkt && whep->audio_pkt->size > 0) {
+            av_packet_ref(pkt, whep->audio_pkt);
+            av_log(s, AV_LOG_INFO, "[WHEP] 🔊 输出音频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节\n",
+                   pkt->stream_index, pkt->pts, pkt->dts, pkt->size);
+            av_packet_free(&whep->audio_pkt);
+        } else {
+            av_log(s, AV_LOG_DEBUG, "[WHEP] 音频包为空或无效，跳过\n");
+            goto redo;
+        }
     } else if (msg->track == whep->video_track) {
-        av_packet_ref(pkt, whep->video_pkt);
-        av_packet_free(&whep->video_pkt);
+        // 浏览器模式：即使没有完整信息也尝试输出视频包
+        if (whep->video_pkt && whep->video_pkt->size > 0) {
+            // 对于 H.264，如果还没有 extradata，尝试从包中提取 SPS/PPS
+            AVStream *st = rtp_ctx->st;
+            if (st && st->codecpar->codec_id == AV_CODEC_ID_H264 && 
+                st->codecpar->extradata_size == 0 && whep->video_pkt->size > 4) {
+                
+                // 查找所有 NAL 单元
+                uint8_t *data = whep->video_pkt->data;
+                int size = whep->video_pkt->size;
+                uint8_t *sps = NULL, *pps = NULL;
+                int sps_size = 0, pps_size = 0;
+                
+                for (int i = 0; i < size - 4; i++) {
+                    // 查找起始码 0x00000001 或 0x000001
+                    if (data[i] == 0 && data[i+1] == 0) {
+                        int nal_start = -1;
+                        if (data[i+2] == 1) {
+                            nal_start = i + 3;
+                        } else if (data[i+2] == 0 && data[i+3] == 1) {
+                            nal_start = i + 4;
+                            i++;
+                        }
+                        
+                        if (nal_start > 0 && nal_start < size) {
+                            uint8_t nal_type = data[nal_start] & 0x1F;
+                            
+                            // 查找 NAL 单元结束位置
+                            int nal_end = size;
+                            for (int j = nal_start + 1; j < size - 2; j++) {
+                                if (data[j] == 0 && data[j+1] == 0 && (data[j+2] == 1 || data[j+2] == 0)) {
+                                    nal_end = j;
+                                    break;
+                                }
+                            }
+                            
+                            if (nal_type == 7) { // SPS
+                                sps = data + nal_start;
+                                sps_size = nal_end - nal_start;
+                            } else if (nal_type == 8) { // PPS
+                                pps = data + nal_start;
+                                pps_size = nal_end - nal_start;
+                            }
+                        }
+                    }
+                }
+                
+                // 如果找到了 SPS 和 PPS，构建 extradata (avcC 格式)
+                if (sps && pps && sps_size > 0 && pps_size > 0) {
+                    int extradata_size = 8 + sps_size + 1 + 2 + pps_size;
+                    uint8_t *extradata = av_mallocz(extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (extradata) {
+                        uint8_t *p = extradata;
+                        *p++ = 1; // configurationVersion
+                        *p++ = sps[1]; // AVCProfileIndication
+                        *p++ = sps[2]; // profile_compatibility
+                        *p++ = sps[3]; // AVCLevelIndication
+                        *p++ = 0xFF; // lengthSizeMinusOne (4 bytes)
+                        *p++ = 0xE1; // numOfSequenceParameterSets
+                        *p++ = (sps_size >> 8) & 0xFF;
+                        *p++ = sps_size & 0xFF;
+                        memcpy(p, sps, sps_size);
+                        p += sps_size;
+                        *p++ = 1; // numOfPictureParameterSets
+                        *p++ = (pps_size >> 8) & 0xFF;
+                        *p++ = pps_size & 0xFF;
+                        memcpy(p, pps, pps_size);
+                        
+                        st->codecpar->extradata = extradata;
+                        st->codecpar->extradata_size = extradata_size;
+                        
+                        av_log(s, AV_LOG_INFO, "[WHEP] ✅ 从视频包中提取到 SPS/PPS: sps_size=%d, pps_size=%d, extradata_size=%d\n",
+                               sps_size, pps_size, extradata_size);
+                    }
+                }
+            }
+            
+            av_packet_ref(pkt, whep->video_pkt);
+            av_log(s, AV_LOG_INFO, "[WHEP] 🎥 输出视频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
+                   pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
+                   (pkt->flags & AV_PKT_FLAG_KEY) ? " [🔑关键帧]" : "");
+            av_packet_free(&whep->video_pkt);
+        } else {
+            av_log(s, AV_LOG_DEBUG, "[WHEP] 视频包为空或无效，跳过\n");
+            goto redo;
+        }
     }
     av_free(msg->data);
     av_free(msg);
