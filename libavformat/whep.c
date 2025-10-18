@@ -114,6 +114,17 @@ typedef struct WHEPContext {
 
     AVPacket *audio_pkt;
     AVPacket *video_pkt;
+
+    // PTS smoothing for stable frame rate
+    int64_t video_pts_base;
+    int64_t video_frame_count;
+    int64_t expected_frame_duration;  // in RTP clock units (90kHz for video)
+    int64_t last_video_rtp_ts;
+    int smooth_pts;  // enable PTS smoothing
+    
+    int64_t audio_pts_base;
+    int64_t audio_frame_count;
+    int64_t last_audio_rtp_ts;
 } WHEPContext;
 
 static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_type)
@@ -313,6 +324,16 @@ static int whep_read_header(AVFormatContext *s)
 
     // 确保 PLI 相关字段初始化为 0
     whep->last_pli_time = 0;
+    
+    // 初始化 PTS 平滑相关字段
+    whep->video_pts_base = AV_NOPTS_VALUE;
+    whep->video_frame_count = 0;
+    whep->expected_frame_duration = 3000;  // 默认 30fps: 90000/30 = 3000
+    whep->last_video_rtp_ts = AV_NOPTS_VALUE;
+    
+    whep->audio_pts_base = AV_NOPTS_VALUE;
+    whep->audio_frame_count = 0;
+    whep->last_audio_rtp_ts = AV_NOPTS_VALUE;
     
     // 浏览器模式：如果用户没有手动设置，自动降低探测要求以快速启动
     // 检查是否为用户设置：probesize 默认 5MB，analyzeduration 默认 0 或 5000000
@@ -539,6 +560,41 @@ redo:
         // 浏览器模式：即使没有完整信息也尝试输出音频包
         if (whep->audio_pkt && whep->audio_pkt->size > 0) {
             av_packet_ref(pkt, whep->audio_pkt);
+            
+            // 音频 PTS 平滑（如果启用）
+            if (whep->smooth_pts && rtp_ctx) {
+                int64_t original_pts = pkt->pts;
+                
+                if (whep->audio_pts_base == AV_NOPTS_VALUE) {
+                    // 首个音频包，建立基准
+                    whep->audio_pts_base = pkt->pts;
+                    whep->last_audio_rtp_ts = pkt->pts;
+                    whep->audio_frame_count = 0;
+                } else {
+                    // 计算预期 PTS（Opus: 48kHz 时钟，20ms = 960 samples）
+                    int64_t expected_pts = whep->audio_pts_base + whep->audio_frame_count * 960;
+                    int64_t pts_diff = llabs(pkt->pts - expected_pts);
+                    
+                    // 如果偏差小于 5 帧（100ms），使用平滑后的 PTS
+                    if (pts_diff < 960 * 5) {
+                        pkt->pts = expected_pts;
+                        pkt->dts = expected_pts;
+                    } else {
+                        // 偏差过大，重新同步
+                        av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 音频时间戳跳跃: 预期=%"PRId64", 实际=%"PRId64", 差值=%"PRId64"ms, 重新同步\n",
+                               expected_pts, original_pts, pts_diff * 1000 / 48000);
+                        whep->audio_pts_base = pkt->pts;
+                        whep->audio_frame_count = 0;
+                    }
+                }
+                
+                whep->audio_frame_count++;
+                whep->last_audio_rtp_ts = original_pts;
+                
+                av_log(s, AV_LOG_DEBUG, "[WHEP] 🔊 音频包 (平滑): 原始PTS=%"PRId64", 平滑PTS=%"PRId64", 帧计数=%"PRId64"\n",
+                       original_pts, pkt->pts, whep->audio_frame_count);
+            }
+            
             av_log(s, AV_LOG_INFO, "[WHEP] 🔊 输出音频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节\n",
                    pkt->stream_index, pkt->pts, pkt->dts, pkt->size);
             av_packet_free(&whep->audio_pkt);
@@ -625,6 +681,50 @@ redo:
             }
             
             av_packet_ref(pkt, whep->video_pkt);
+            
+            // 视频 PTS 平滑（如果启用）
+            if (whep->smooth_pts && rtp_ctx) {
+                int64_t original_pts = pkt->pts;
+                
+                if (whep->video_pts_base == AV_NOPTS_VALUE) {
+                    // 首个视频包，建立基准
+                    whep->video_pts_base = pkt->pts;
+                    whep->last_video_rtp_ts = pkt->pts;
+                    whep->video_frame_count = 0;
+                    
+                    av_log(s, AV_LOG_INFO, "[WHEP] 📹 建立视频时间基准: base_pts=%"PRId64", frame_duration=%"PRId64" (%.2f fps)\n",
+                           whep->video_pts_base, whep->expected_frame_duration, 
+                           90000.0 / whep->expected_frame_duration);
+                } else {
+                    // 计算预期 PTS（基于固定帧率）
+                    int64_t expected_pts = whep->video_pts_base + 
+                                           whep->video_frame_count * whep->expected_frame_duration;
+                    int64_t pts_diff = llabs(pkt->pts - expected_pts);
+                    
+                    // 如果偏差小于 3 帧，使用平滑后的 PTS
+                    if (pts_diff < whep->expected_frame_duration * 3) {
+                        pkt->pts = expected_pts;
+                        pkt->dts = expected_pts;
+                        
+                        if (pts_diff > whep->expected_frame_duration / 2) {
+                            av_log(s, AV_LOG_DEBUG, "[WHEP] 📹 视频时间戳校正: 原始=%"PRId64", 预期=%"PRId64", 差值=%.1fms\n",
+                                   original_pts, expected_pts, pts_diff * 1000.0 / 90000);
+                        }
+                    } else {
+                        // 偏差过大（可能是关键帧或网络问题），重新同步
+                        av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 视频时间戳跳跃: 预期=%"PRId64", 实际=%"PRId64", 差值=%.1fms (%"PRId64" 帧), %s\n",
+                               expected_pts, original_pts, pts_diff * 1000.0 / 90000,
+                               pts_diff / whep->expected_frame_duration,
+                               (pkt->flags & AV_PKT_FLAG_KEY) ? "关键帧-重新同步" : "丢包-重新同步");
+                        whep->video_pts_base = pkt->pts;
+                        whep->video_frame_count = 0;
+                    }
+                }
+                
+                whep->video_frame_count++;
+                whep->last_video_rtp_ts = original_pts;
+            }
+            
             av_log(s, AV_LOG_INFO, "[WHEP] 🎥 输出视频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
                    pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
                    (pkt->flags & AV_PKT_FLAG_KEY) ? " [🔑关键帧]" : "");
@@ -706,6 +806,8 @@ static const AVOption whep_options[] = {
         OFFSET(pli_period), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "reorder_queue_size", "set RTP packet reorder queue size for jitter buffer (default: 10 for low latency, 0 for auto)",
         OFFSET(reorder_queue_size), AV_OPT_TYPE_INT, { .i64 = 10 }, 0, 500, AV_OPT_FLAG_DECODING_PARAM },
+    { "smooth_pts", "enable PTS smoothing for stable frame rate (0=disable, 1=enable, default: 1)",
+        OFFSET(smooth_pts), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
     { NULL }
 };
 
