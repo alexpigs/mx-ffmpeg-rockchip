@@ -196,11 +196,14 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
     if (st->codecpar->sample_rate > 0)
         st->time_base = (AVRational){1, st->codecpar->sample_rate};
 
-    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, RTP_REORDER_QUEUE_DEFAULT_SIZE);
+    // 使用配置的 reorder queue 大小，默认 10 包（低延迟）
+    int queue_size = whep->reorder_queue_size > 0 ? whep->reorder_queue_size : 10;
+    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, queue_size);
     if (!rtp_ctx) {
         av_log(s, AV_LOG_ERROR, "Failed to open RTP context\n");
         goto fail;
     }
+    av_log(s, AV_LOG_INFO, "[WHEP] RTP jitter buffer 大小: %d 包\n", queue_size);
     if (handler) {
         ffstream(st)->need_parsing = handler->need_parsing;
         dynamic_protocol_context = av_mallocz(handler->priv_data_size);
@@ -701,6 +704,8 @@ static const AVOption whep_options[] = {
         OFFSET(server_type), AV_OPT_TYPE_STRING, { .str = "standard" }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
     { "pli_period", "set interval in seconds for sending periodic PLI (Picture Loss Indication) requests; 0 to disable",
         OFFSET(pli_period), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+    { "reorder_queue_size", "set RTP packet reorder queue size for jitter buffer (default: 10 for low latency, 0 for auto)",
+        OFFSET(reorder_queue_size), AV_OPT_TYPE_INT, { .i64 = 10 }, 0, 500, AV_OPT_FLAG_DECODING_PARAM },
     { NULL }
 };
 

@@ -68,6 +68,19 @@ sudo ./ffmpeg_g -loglevel error \
   -probesize 32K -analyzeduration 0 \
   -fflags nobuffer -flags low_delay \
   -hwaccel rkmpp -hwaccel_output_format drm_prime \
+  -reorder_queue_size 5 \
+  -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
+  -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" \
+  -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
+  -vsync 2 \
+  -f mxcam -phone 2 -
+
+# 极低延迟版本（牺牲稳定性）
+sudo ./ffmpeg_g -loglevel error \
+  -probesize 32K -analyzeduration 0 \
+  -fflags nobuffer -flags low_delay \
+  -hwaccel rkmpp -hwaccel_output_format drm_prime \
+  -reorder_queue_size 2 \
   -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
   -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" \
   -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
