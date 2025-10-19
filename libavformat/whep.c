@@ -305,10 +305,20 @@ static void message_callback(int id, const char *message, int size, void *ptr)
     current_head = atomic_load_explicit(&whep->head, memory_order_acquire);
 
     if (next == current_head) {
-        av_log(whep, AV_LOG_ERROR, "Message buffer is full\n");
-        av_free(msg->data);
-        av_free(msg);
-        return;
+        // 缓冲区满：丢弃最旧的数据（head 位置），为新数据腾出空间
+        Message *old_msg = whep->buffer[current_head];
+        if (old_msg) {
+            av_free(old_msg->data);
+            av_free(old_msg);
+            whep->buffer[current_head] = NULL;
+        }
+        
+        // 移动 head 指针，丢弃最旧的包
+        int new_head = (current_head + 1) % whep->capacity;
+        atomic_store_explicit(&whep->head, new_head, memory_order_release);
+        
+        av_log(whep, AV_LOG_WARNING, "[WHEP] ⚠️ 缓冲区满，丢弃最旧数据包（head=%d→%d）\n", 
+               current_head, new_head);
     }
 
     whep->buffer[current_tail] = msg;
@@ -584,146 +594,22 @@ redo:
         goto redo;
 
     if (msg->track == whep->audio_track) {
-        // 浏览器模式：即使没有完整信息也尝试输出音频包
+        // 直接输出音频包
         if (whep->audio_pkt && whep->audio_pkt->size > 0) {
-        av_packet_ref(pkt, whep->audio_pkt);
-            
-            // 音频 PTS 平滑（如果启用）
-            if (whep->smooth_pts && rtp_ctx) {
-                int64_t original_pts = pkt->pts;
-                
-                if (whep->audio_pts_base == AV_NOPTS_VALUE) {
-                    // 首个音频包，建立基准
-                    whep->audio_pts_base = pkt->pts;
-                    whep->last_audio_rtp_ts = pkt->pts;
-                    whep->audio_frame_count = 0;
-                } else {
-                    // 计算预期 PTS（Opus: 48kHz 时钟，20ms = 960 samples）
-                    int64_t expected_pts = whep->audio_pts_base + whep->audio_frame_count * 960;
-                    int64_t pts_diff = llabs(pkt->pts - expected_pts);
-                    
-                    // 如果偏差小于 5 帧（100ms），使用平滑后的 PTS
-                    if (pts_diff < 960 * 5) {
-                        pkt->pts = expected_pts;
-                        pkt->dts = expected_pts;
-                    } else {
-                        // 偏差过大，重新同步（不打印日志）
-                        whep->audio_pts_base = pkt->pts;
-                        whep->audio_frame_count = 0;
-                    }
-                }
-                
-                whep->audio_frame_count++;
-                whep->last_audio_rtp_ts = original_pts;
-            }
-            
-            // 不打印音频包输出日志
-        av_packet_free(&whep->audio_pkt);
+            av_packet_ref(pkt, whep->audio_pkt);
+            av_packet_free(&whep->audio_pkt);
         } else {
             goto redo;
         }
     } else if (msg->track == whep->video_track) {
-        // 实时时钟节流：按固定帧率输出，避免网络抖动影响
-        int64_t now = av_gettime_relative();
-        
-        if (whep->start_time == 0) {
-            // 首次接收，建立时间基准
-            whep->start_time = now;
-            whep->last_output_time = now;
-        } else {
-            // 计算距离上次输出的时间
-            int64_t elapsed = now - whep->last_output_time;
-            
-            // 如果还没到输出时间，等待
-            if (elapsed < whep->target_frame_interval) {
-                int64_t wait_time = whep->target_frame_interval - elapsed;
-                av_log(s, AV_LOG_DEBUG, "[WHEP] ⏰ 等待 %.1fms 以维持帧率\n", wait_time / 1000.0);
-                av_usleep(wait_time);
-                now = av_gettime_relative();
-            }
-        }
-        
-        // 直接输出视频包，不做格式转换（推流端已保证格式正确）
+        // 直接输出视频包
         if (whep->video_pkt && whep->video_pkt->size > 0) {
             av_packet_ref(pkt, whep->video_pkt);
-            
-            // 视频 PTS 平滑（如果启用）
-            if (whep->smooth_pts && rtp_ctx) {
-                int64_t original_pts = pkt->pts;
-                
-                if (whep->video_pts_base == AV_NOPTS_VALUE) {
-                    // 首个视频包，建立基准
-                    whep->video_pts_base = pkt->pts;
-                    whep->last_video_rtp_ts = pkt->pts;
-                    whep->video_frame_count = 0;
-                    
-                    av_log(s, AV_LOG_INFO, "[WHEP] 📹 建立视频时间基准: base_pts=%"PRId64", frame_duration=%"PRId64" (%.2f fps)\n",
-                           whep->video_pts_base, whep->expected_frame_duration, 
-                           90000.0 / whep->expected_frame_duration);
-                } else {
-                    // 计算预期 PTS（基于固定帧率）
-                    int64_t expected_pts = whep->video_pts_base + 
-                                           whep->video_frame_count * whep->expected_frame_duration;
-                    int64_t pts_diff = llabs(pkt->pts - expected_pts);
-                    
-                    // 如果偏差小于 3 帧，使用平滑后的 PTS
-                    if (pts_diff < whep->expected_frame_duration * 3) {
-                        pkt->pts = expected_pts;
-                        pkt->dts = expected_pts;
-                        
-                        if (pts_diff > whep->expected_frame_duration / 2) {
-                            av_log(s, AV_LOG_DEBUG, "[WHEP] 📹 视频时间戳校正: 原始=%"PRId64", 预期=%"PRId64", 差值=%.1fms\n",
-                                   original_pts, expected_pts, pts_diff * 1000.0 / 90000);
-                        }
-                    } else {
-                        // 偏差过大（可能是关键帧或网络问题），重新同步
-                        // Rate limit this warning to once per second
-                        int64_t now_micro = av_gettime_relative();
-                        whep->ts_jump_warning_count++;
-                        if (now_micro - whep->last_ts_jump_warning_time >= 1000000) {
-                            if (whep->ts_jump_warning_count > 1) {
-                                av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 视频时间戳跳跃 (过去1秒内发生 %d 次): 最后差值=%.1fms (%"PRId64" 帧), %s\n",
-                                       whep->ts_jump_warning_count, pts_diff * 1000.0 / 90000,
-                                       pts_diff / whep->expected_frame_duration,
-                                       (pkt->flags & AV_PKT_FLAG_KEY) ? "关键帧-重新同步" : "丢包-重新同步");
-                            } else {
-                                av_log(s, AV_LOG_WARNING, "[WHEP] ⚠️ 视频时间戳跳跃: 预期=%"PRId64", 实际=%"PRId64", 差值=%.1fms (%"PRId64" 帧), %s\n",
-                                       expected_pts, original_pts, pts_diff * 1000.0 / 90000,
-                                       pts_diff / whep->expected_frame_duration,
-                                       (pkt->flags & AV_PKT_FLAG_KEY) ? "关键帧-重新同步" : "丢包-重新同步");
-                            }
-                            whep->last_ts_jump_warning_time = now_micro;
-                            whep->ts_jump_warning_count = 0;
-                        }
-                        whep->video_pts_base = pkt->pts;
-                        whep->video_frame_count = 0;
-                    }
-                }
-                
-                whep->video_frame_count++;
-                whep->last_video_rtp_ts = original_pts;
-            }
-            
-            // 更新输出时间
-            whep->last_output_time = now;
-            
-            // 备份当前帧用于可能的重复（未来实现）
-            if (whep->enable_frame_repeat) {
-                if (!whep->last_video_frame) {
-                    whep->last_video_frame = av_packet_alloc();
-                }
-                if (whep->last_video_frame) {
-                    av_packet_unref(whep->last_video_frame);
-                    av_packet_ref(whep->last_video_frame, pkt);
-                }
-            }
-            
-            av_log(s, AV_LOG_INFO, "[WHEP] 🎥 输出视频包: stream_index=%d, pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
-                   pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
-                   (pkt->flags & AV_PKT_FLAG_KEY) ? " [🔑关键帧]" : "");
+            av_log(s, AV_LOG_DEBUG, "[WHEP] 输出视频包: pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
+                   pkt->pts, pkt->dts, pkt->size,
+                   (pkt->flags & AV_PKT_FLAG_KEY) ? " [关键帧]" : "");
             av_packet_free(&whep->video_pkt);
         } else {
-            av_log(s, AV_LOG_DEBUG, "[WHEP] 视频包为空或无效，跳过\n");
             goto redo;
         }
     }
