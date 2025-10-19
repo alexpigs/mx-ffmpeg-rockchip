@@ -1,37 +1,14 @@
-/**
- * WHEP (WebRTC-HTTP Egress Protocol) demuxer
- * Copyright (c) 2025
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
 
 #include <rtc/rtc.h>
 #include <stdatomic.h>
-#include <limits.h>
-#include <string.h>
-#include <inttypes.h>
-
 #include "avformat.h"
 #include "demux.h"
 #include "libavcodec/codec_id.h"
 #include "libavutil/avstring.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/mem.h"
 #include "libavutil/time.h"
+#include "libavutil/random_seed.h"
 #include "rtpdec.h"
 #include "whip_whep.h"
 
@@ -43,12 +20,12 @@ static const struct {
     int clock_rate;
     int audio_channels;
 } dynamic_payload_types[] = {
-    {96,  "VP8",  AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_VP8,  90000, -1},
-    {97,  "VP9",  AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_VP9,  90000, -1},
-    {98,  "H264", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, 90000, -1},
-    {99,  "H265", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H265, 90000, -1},
-    {111, "OPUS", AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_OPUS, 48000,  2},
-    {-1,  "",     AVMEDIA_TYPE_UNKNOWN, AV_CODEC_ID_NONE, -1,   -1}
+  {96, "VP8", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_VP8,  90000, -1},
+  {97, "VP9", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_VP9,  90000, -1},
+  {98, "H264", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264, 90000, -1},
+  {99, "H265", AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H265, 90000, -1},
+  {111, "OPUS", AVMEDIA_TYPE_AUDIO, AV_CODEC_ID_OPUS, 48000, 2},
+  {-1, "", AVMEDIA_TYPE_UNKNOWN, AV_CODEC_ID_NONE, -1, -1}
 };
 
 static const char *audio_mline =
@@ -92,11 +69,9 @@ typedef struct Message {
 typedef struct WHEPContext {
     AVClass *class;
     char *token;
-    char *server_type;
     char *session_url;
     int64_t pli_period;
     int64_t last_pli_time;
-    int reorder_queue_size;
 
     // libdatachannel state
     int pc;
@@ -114,30 +89,6 @@ typedef struct WHEPContext {
 
     AVPacket *audio_pkt;
     AVPacket *video_pkt;
-
-    // PTS smoothing and frame rate control
-    int64_t video_pts_base;
-    int64_t video_frame_count;
-    int64_t expected_frame_duration;  // in RTP clock units (90kHz for video)
-    int64_t last_video_rtp_ts;
-    int smooth_pts;  // enable PTS smoothing
-    
-    int64_t audio_pts_base;
-    int64_t audio_frame_count;
-    int64_t last_audio_rtp_ts;
-    
-    // Real-time clock-based frame rate control
-    int64_t start_time;           // av_gettime_relative() when first packet received
-    int64_t last_output_time;     // last time we output a packet
-    int64_t target_frame_interval; // microseconds between frames (1000000/fps)
-    AVPacket *last_video_frame;   // for frame repeat on loss
-    int enable_frame_repeat;      // repeat last frame on packet loss
-    
-    // Rate limiting for warnings to reduce log spam
-    int64_t last_ts_jump_warning_time;    // last time we logged timestamp jump warning
-    int64_t last_nal_warning_time;        // last time we logged NAL start code warning
-    int ts_jump_warning_count;            // count of timestamp jumps since last warning
-    int nal_warning_count;                // count of NAL warnings since last warning
 } WHEPContext;
 
 static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_type)
@@ -176,7 +127,7 @@ static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_ty
     return AVERROR(ENOENT);
 }
 
-static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_type)
+static RTPDemuxContext* whep_new_rtp_context(AVFormatContext *s, int payload_type)
 {
     WHEPContext *whep = s->priv_data;
     RTPDemuxContext **rtp_ctxs = NULL;
@@ -186,7 +137,7 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
     PayloadContext *dynamic_protocol_context = NULL;
 
     rtp_ctxs = av_realloc_array(whep->rtp_ctxs, whep->rtp_ctxs_count + 1,
-                                sizeof(*whep->rtp_ctxs));
+                                           sizeof(*whep->rtp_ctxs));
     if (!rtp_ctxs) {
         av_log(s, AV_LOG_ERROR, "Failed to allocate RTP context array\n");
         goto fail;
@@ -212,7 +163,7 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
                 if (dynamic_payload_types[i].clock_rate > 0)
                     st->codecpar->sample_rate = dynamic_payload_types[i].clock_rate;
                 handler = ff_rtp_handler_find_by_name(dynamic_payload_types[i].enc_name,
-                                                      dynamic_payload_types[i].codec_type);
+                                                     dynamic_payload_types[i].codec_type);
                 break;
             }
         }
@@ -220,14 +171,11 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
     if (st->codecpar->sample_rate > 0)
         st->time_base = (AVRational){1, st->codecpar->sample_rate};
 
-    // 使用配置的 reorder queue 大小，默认 10 包（低延迟）
-    int queue_size = whep->reorder_queue_size > 0 ? whep->reorder_queue_size : 10;
-    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, queue_size);
+    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, RTP_REORDER_QUEUE_DEFAULT_SIZE);
     if (!rtp_ctx) {
         av_log(s, AV_LOG_ERROR, "Failed to open RTP context\n");
         goto fail;
     }
-    av_log(s, AV_LOG_INFO, "[WHEP] RTP jitter buffer 大小: %d 包\n", queue_size);
     if (handler) {
         ffstream(st)->need_parsing = handler->need_parsing;
         dynamic_protocol_context = av_mallocz(handler->priv_data_size);
@@ -244,19 +192,12 @@ static RTPDemuxContext *whep_new_rtp_context(AVFormatContext *s, int payload_typ
         if (handler->parse_sdp_a_line) {
             char line[SDP_MAX_SIZE];
             int track_id = (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ?
-                           whep->audio_track : whep->video_track;
+                          whep->audio_track : whep->video_track;
             if (whep_get_sdp_a_line(track_id, line, sizeof(line), payload_type) < 0) {
-                av_log(s, AV_LOG_INFO, "[WHEP] ⚠️ 未找到 payload %d 的 SDP a-line，将依赖实际数据解析（类似浏览器模式）\n", payload_type);
+                av_log(s, AV_LOG_WARNING, "No SDP a-line for payload type %d\n", payload_type);
             } else {
-                av_log(s, AV_LOG_INFO, "[WHEP] 解析 SDP a-line (payload %d): %s\n", payload_type, line);
                 handler->parse_sdp_a_line(s, st->index, dynamic_protocol_context, line);
             }
-        }
-        
-        // 浏览器模式：标记为需要完整解析，允许从实际数据中提取 codec 信息
-        if (st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_H265) {
-            ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL;
-            av_log(s, AV_LOG_INFO, "[WHEP] 🌐 启用浏览器模式：视频流将从实际数据中解析 codec 信息\n");
         }
     }
 
@@ -279,11 +220,8 @@ static void message_callback(int id, const char *message, int size, void *ptr)
     if (size < 2)
         return;
 
-    if ((RTP_PT_IS_RTCP(message[1]) && size < 8) || size < 12)
+    if (RTP_PT_IS_RTCP(message[1]) && size < 8 || size < 12)
         return;
-
-    // 打印接收到的消息信息 (仅视频相关)
-    // 跳过音频日志以减少噪音
 
     // Push packet to ring buffer
     msg = av_malloc(sizeof(Message));
@@ -305,20 +243,10 @@ static void message_callback(int id, const char *message, int size, void *ptr)
     current_head = atomic_load_explicit(&whep->head, memory_order_acquire);
 
     if (next == current_head) {
-        // 缓冲区满：丢弃最旧的数据（head 位置），为新数据腾出空间
-        Message *old_msg = whep->buffer[current_head];
-        if (old_msg) {
-            av_free(old_msg->data);
-            av_free(old_msg);
-            whep->buffer[current_head] = NULL;
-        }
-        
-        // 移动 head 指针，丢弃最旧的包
-        int new_head = (current_head + 1) % whep->capacity;
-        atomic_store_explicit(&whep->head, new_head, memory_order_release);
-        
-        av_log(whep, AV_LOG_WARNING, "[WHEP] ⚠️ 缓冲区满，丢弃最旧数据包（head=%d→%d）\n", 
-               current_head, new_head);
+        av_log(whep, AV_LOG_ERROR, "Message buffer is full\n");
+        av_free(msg->data);
+        av_free(msg);
+        return;
     }
 
     whep->buffer[current_tail] = msg;
@@ -331,46 +259,7 @@ static int whep_read_header(AVFormatContext *s)
     rtcConfiguration config = {0};
 
     ff_whip_whep_init_rtc_logger();
-    
-    // WHEP 流是异步创建的（接收到第一个 RTP 包时），需要设置 NOHEADER
     s->ctx_flags |= AVFMTCTX_NOHEADER;
-
-    // 确保 PLI 相关字段初始化为 0
-    whep->last_pli_time = 0;
-    
-    // 初始化 PTS 平滑相关字段
-    whep->video_pts_base = AV_NOPTS_VALUE;
-    whep->video_frame_count = 0;
-    whep->expected_frame_duration = 3000;  // 默认 30fps: 90000/30 = 3000
-    whep->last_video_rtp_ts = AV_NOPTS_VALUE;
-    
-    whep->audio_pts_base = AV_NOPTS_VALUE;
-    whep->audio_frame_count = 0;
-    whep->last_audio_rtp_ts = AV_NOPTS_VALUE;
-    
-    // 初始化实时时钟控制
-    whep->start_time = 0;
-    whep->last_output_time = 0;
-    whep->target_frame_interval = 33333;  // 默认 30fps = 33.333ms
-    whep->last_video_frame = NULL;
-    whep->enable_frame_repeat = 1;  // 默认启用帧重复
-    
-    // 浏览器模式：如果用户没有手动设置，自动降低探测要求以快速启动
-    // 检查是否为用户设置：probesize 默认 5MB，analyzeduration 默认 0 或 5000000
-    int probesize_default = (s->probesize <= 5000000);  // <= 5MB 认为是默认或用户想要快速启动
-    int analyze_default = (s->max_analyze_duration == 0 || s->max_analyze_duration == 5000000);
-    
-    if (probesize_default && s->probesize > 500000) {
-        s->probesize = 500000;  // 减少到 500KB
-        av_log(s, AV_LOG_INFO, "[WHEP] 🌐 浏览器模式：降低 probesize 到 %d (原值: %d)\n", 
-               s->probesize, 5000000);
-    }
-    if (analyze_default && s->max_analyze_duration != 1000000) {
-        int64_t old_value = s->max_analyze_duration;
-        s->max_analyze_duration = 1000000;  // 减少到 1 秒
-        av_log(s, AV_LOG_INFO, "[WHEP] 🌐 浏览器模式：降低 analyzeduration 到 %lld (原值: %lld)\n", 
-               s->max_analyze_duration, old_value);
-    }
 
     whep->capacity = 1024;
     whep->buffer = av_calloc(whep->capacity, sizeof(*whep->buffer));
@@ -409,17 +298,16 @@ static int whep_read_header(AVFormatContext *s)
         return AVERROR_EXTERNAL;
     }
 
-    return ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url, whep->server_type);
+    return ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url);
 }
 
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     WHEPContext *whep = s->priv_data;
-    int current_head, current_tail, ret = 0;
+    int current_head, current_tail, ret;
     Message *msg = NULL;
     RTPDemuxContext *rtp_ctx = NULL;
     AVIOContext *dyn_bc = NULL;
-
     if (!whep->audio_pkt)
         whep->audio_pkt = av_packet_alloc();
     if (!whep->video_pkt)
@@ -439,17 +327,23 @@ redo:
     current_head = atomic_load_explicit(&whep->head, memory_order_relaxed);
     current_tail = atomic_load_explicit(&whep->tail, memory_order_acquire);
 
-    if (current_head == current_tail)
+    if (current_head == current_tail)  // empty
         return AVERROR(EAGAIN);
+    
+    // 计算ring buffer中待处理的消息数量
+    int pending = (current_tail - current_head + whep->capacity) % whep->capacity;
+    if (pending > 10) {
+        av_log(s, AV_LOG_WARNING, "[WHEP] Ring buffer 积压: %d 个消息待处理\n", pending);
+    }
+    
     msg = whep->buffer[current_head];
     atomic_store_explicit(&whep->head, (current_head + 1) % whep->capacity,
-                          memory_order_release);
+                         memory_order_release);
 
     if (RTP_PT_IS_RTCP(msg->data[1])) {
-        switch (msg->data[1]) {
-        case RTCP_SR: {
-            uint32_t ssrc = (msg->data[4] << 24) | (msg->data[5] << 16) |
-                            (msg->data[6] << 8)  |  msg->data[7];
+        switch(msg->data[1]) {
+        case RTCP_SR:
+            uint32_t ssrc = (msg->data[4] << 24) | (msg->data[5] << 16) | (msg->data[6] << 8) | msg->data[7];
             for (int i = 0; i < whep->rtp_ctxs_count; i++) {
                 if (whep->rtp_ctxs[i]->ssrc == ssrc) {
                     rtp_ctx = whep->rtp_ctxs[i];
@@ -467,7 +361,6 @@ redo:
                 av_free(dyn_buf);
             }
             break;
-        }
         default:
             goto redo;
         }
@@ -492,22 +385,8 @@ redo:
                 }
             }
             if (ret == 0) {
+                av_log(s, AV_LOG_DEBUG, "Create RTP context for payload type %d\n", payload_type);
                 rtp_ctx = whep_new_rtp_context(s, payload_type);
-                if (rtp_ctx && rtp_ctx->st) {
-                    AVCodecParameters *par = rtp_ctx->st->codecpar;
-                    // 只打印视频相关信息
-                    if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
-                        av_log(s, AV_LOG_INFO, "[WHEP] 创建 RTP context for payload type %d\n", payload_type);
-                        av_log(s, AV_LOG_INFO, "[WHEP] RTP context 创建成功: codec=%s, extradata_size=%d\n",
-                               avcodec_get_name(par->codec_id), par->extradata_size);
-                        if (par->extradata_size > 0 && par->extradata) {
-                            av_log(s, AV_LOG_INFO, "[WHEP] extradata 前16字节:");
-                            for (int i = 0; i < FFMIN(16, par->extradata_size); i++)
-                                av_log(s, AV_LOG_INFO, " %02x", par->extradata[i]);
-                            av_log(s, AV_LOG_INFO, "\n");
-                        }
-                    }
-                }
             }
         }
     }
@@ -518,46 +397,12 @@ redo:
     }
 
     // Parse RTP packet
-    int parse_result;
-    if (msg->track == whep->audio_track) {
-        parse_result = ff_rtp_parse_packet(rtp_ctx, whep->audio_pkt, (uint8_t **)&msg->data, msg->size);
-    } else if (msg->track == whep->video_track) {
-        parse_result = ff_rtp_parse_packet(rtp_ctx, whep->video_pkt, (uint8_t **)&msg->data, msg->size);
-    } else {
-        parse_result = -1;
-    }
-    
-    // parse_result < 0 表示 jitter buffer 正在等待更多包来组装完整帧
-    // 此时不应该返回 EAGAIN，而是应该继续处理队列中的其他包
-    if (parse_result < 0) {
-        // Jitter buffer 正在组装包，继续处理下一个
-        goto redo;
-    }
-    
-    // parse_result >= 0 表示包已输出
-    ret = 0;
-
-    // 首次收到视频包时，立即发送 PLI 请求关键帧（带 SPS/PPS）
-    if (msg->track == whep->video_track) {
-        if (rtp_ctx->ssrc && whep->last_pli_time == 0) {
-            uint32_t source_ssrc = rtp_ctx->ssrc;
-            uint32_t sender_ssrc = source_ssrc + 1;
-            uint8_t pli_packet[] = {
-                (RTP_VERSION << 6) | 1, RTCP_PSFB,         0x00,             0x02,
-                sender_ssrc >> 24,      sender_ssrc >> 16, sender_ssrc >> 8, sender_ssrc,
-                source_ssrc >> 24,      source_ssrc >> 16, source_ssrc >> 8, source_ssrc,
-            };
-            if (rtcSendMessage(msg->track, pli_packet, sizeof(pli_packet)) < 0)
-                av_log(s, AV_LOG_ERROR, "[WHEP] 首次发送 PLI 失败\n");
-            else {
-                av_log(s, AV_LOG_INFO, "[WHEP] ✅ 首次发送 PLI 请求关键帧 (SSRC=0x%08x)\n", source_ssrc);
-                whep->last_pli_time = av_gettime_relative();
-            }
-        } else {
-            av_log(s, AV_LOG_DEBUG, "[WHEP] PLI 条件不满足: ssrc=0x%08x, last_pli_time=%lld\n", 
-                   rtp_ctx->ssrc, whep->last_pli_time);
-        }
-    }
+    if (msg->track == whep->audio_track)
+        ret = ff_rtp_parse_packet(rtp_ctx, whep->audio_pkt, (uint8_t **)&msg->data, msg->size);
+    else if (msg->track == whep->video_track)
+        ret = ff_rtp_parse_packet(rtp_ctx, whep->video_pkt, (uint8_t **)&msg->data, msg->size);
+    else
+        ret = -1;  // 未知track类型
 
     // Send RTCP feedback
     if (avio_open_dyn_buf(&dyn_bc) == 0) {
@@ -575,7 +420,7 @@ redo:
         int64_t now = av_gettime_relative();
         if ((whep->pli_period && now - whep->last_pli_time >= whep->pli_period * 1000000) ||
             (rtp_ctx->handler && rtp_ctx->handler->need_keyframe &&
-             rtp_ctx->handler->need_keyframe(rtp_ctx->dynamic_protocol_context))) {
+            rtp_ctx->handler->need_keyframe(rtp_ctx->dynamic_protocol_context))) {
             uint32_t source_ssrc = rtp_ctx->ssrc;
             uint32_t sender_ssrc = source_ssrc + 1;
             uint8_t pli_packet[] = {
@@ -590,28 +435,24 @@ redo:
         }
     }
 
-    if (ret != 0)
+    // ret < 0: 没有packet（错误或需要更多RTP包），继续读取下一个消息
+    // ret >= 0: 有完整的packet可以返回
+    if (ret < 0) {
+        av_log(s, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet 返回 %d，需要更多RTP包\n", ret);
         goto redo;
+    }
 
     if (msg->track == whep->audio_track) {
-        // 直接输出音频包
-        if (whep->audio_pkt && whep->audio_pkt->size > 0) {
-            av_packet_ref(pkt, whep->audio_pkt);
-            av_packet_free(&whep->audio_pkt);
-        } else {
-            goto redo;
-        }
+        av_log(s, AV_LOG_DEBUG, "[WHEP] 返回音频包: pts=%" PRId64 ", size=%d\n", 
+               whep->audio_pkt->pts, whep->audio_pkt->size);
+        av_packet_ref(pkt, whep->audio_pkt);
+        av_packet_free(&whep->audio_pkt);
     } else if (msg->track == whep->video_track) {
-        // 直接输出视频包
-        if (whep->video_pkt && whep->video_pkt->size > 0) {
-            av_packet_ref(pkt, whep->video_pkt);
-            av_log(s, AV_LOG_DEBUG, "[WHEP] 输出视频包: pts=%"PRId64", dts=%"PRId64", 大小=%d 字节%s\n",
-                   pkt->pts, pkt->dts, pkt->size,
-                   (pkt->flags & AV_PKT_FLAG_KEY) ? " [关键帧]" : "");
-            av_packet_free(&whep->video_pkt);
-        } else {
-            goto redo;
-        }
+        av_log(s, AV_LOG_DEBUG, "[WHEP] 返回视频包: pts=%" PRId64 ", size=%d, keyframe=%d\n",
+               whep->video_pkt->pts, whep->video_pkt->size, 
+               !!(whep->video_pkt->flags & AV_PKT_FLAG_KEY));
+        av_packet_ref(pkt, whep->video_pkt);
+        av_packet_free(&whep->video_pkt);
     }
     av_free(msg->data);
     av_free(msg);
@@ -666,8 +507,6 @@ static int whep_read_close(AVFormatContext *s)
         av_packet_free(&whep->audio_pkt);
     if (whep->video_pkt)
         av_packet_free(&whep->video_pkt);
-    if (whep->last_video_frame)
-        av_packet_free(&whep->last_video_frame);
 
     if (whep->session_url) {
         ff_whip_whep_delete_session(s, whep->token, whep->session_url);
@@ -681,18 +520,8 @@ static int whep_read_close(AVFormatContext *s)
 static const AVOption whep_options[] = {
     { "token", "set token to send in the Authorization header as \"Bearer <token>\"",
         OFFSET(token), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
-    { "server_type", "set server type (standard or srs)",
-        OFFSET(server_type), AV_OPT_TYPE_STRING, { .str = "standard" }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
     { "pli_period", "set interval in seconds for sending periodic PLI (Picture Loss Indication) requests; 0 to disable",
-        OFFSET(pli_period), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
-    { "reorder_queue_size", "set RTP packet reorder queue size for jitter buffer (default: 10 for low latency, 0 for auto)",
-        OFFSET(reorder_queue_size), AV_OPT_TYPE_INT, { .i64 = 10 }, 0, 500, AV_OPT_FLAG_DECODING_PARAM },
-    { "smooth_pts", "enable PTS smoothing for stable frame rate (0=disable, 1=enable, default: 1)",
-        OFFSET(smooth_pts), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
-    { "frame_repeat", "enable frame repeat on packet loss to avoid stuttering (0=disable, 1=enable, default: 1)",
-        OFFSET(enable_frame_repeat), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
-    { "target_fps", "target frame rate for output throttling (default: 30)",
-        OFFSET(target_frame_interval), AV_OPT_TYPE_INT, { .i64 = 33333 }, 10000, 100000, AV_OPT_FLAG_DECODING_PARAM },
+        OFFSET(pli_period), AV_OPT_TYPE_INT, {.i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { NULL }
 };
 

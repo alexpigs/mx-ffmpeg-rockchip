@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <inttypes.h>
+#include <cassert>
 #define BOOST_ERROR_CODE_HEADER_ONLY
 #include <boost/asio.hpp>
 #include <boost/bind/bind.hpp>
@@ -1154,6 +1155,21 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
 
   MxContext *mx = (MxContext *)s1->priv_data;
 
+  // 调试：统计收到的包数量
+  static int packet_count = 0;
+  packet_count++;
+  
+  if (packet_count % 100 == 0) {
+    av_log(s1, AV_LOG_WARNING, "[MXCam] 已处理 %d 个包\n", packet_count);
+  }
+  
+  // 调试：收到超过2k个包时停止，方便分析
+  if (packet_count > 2000) {
+    av_log(s1, AV_LOG_ERROR, "[MXCam] 已收到 %d 个包，触发调试断言\n", packet_count);
+    assert(packet_count <= 2000 && "Debug: 超过2000个包，停止进程以便分析");
+    exit(-1);
+  }
+
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
     AVCodecParameters *par = s1->streams[pkt->stream_index]->codecpar;
@@ -1162,8 +1178,59 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
     return 0;
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
-    av_log(s1, AV_LOG_INFO, "[MXCam] 接收视频包: stream_index=%d, pts=%" PRId64 ", dts=%" PRId64 ", 大小=%d 字节%s, codec=%s, 分辨率=%dx%d\n",
-           pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
+    int64_t timestamp_ms = av_gettime() / 1000;
+    
+    // 调试：检查 extradata (SPS/PPS)
+    static int extradata_logged = 0;
+    if (!extradata_logged) {
+      av_log(s1, AV_LOG_WARNING, "[MXCam Debug] Codec Extradata: %s (size=%d)\n",
+             par->extradata ? "存在" : "缺失", par->extradata_size);
+      if (par->extradata && par->extradata_size > 0) {
+        av_log(s1, AV_LOG_WARNING, "[MXCam Debug] Extradata 内容前16字节: ");
+        for (int i = 0; i < FFMIN(16, par->extradata_size); i++) {
+          av_log(s1, AV_LOG_WARNING, "%02x ", par->extradata[i]);
+        }
+        av_log(s1, AV_LOG_WARNING, "\n");
+      }
+      extradata_logged = 1;
+    }
+    
+    // 调试：检查前5个视频包的 NAL unit 类型
+    if (packet_count <= 5 && pkt->size >= 5) {
+      av_log(s1, AV_LOG_WARNING, "[MXCam Debug] 包 #%d 前16字节: ", packet_count);
+      for (int i = 0; i < FFMIN(16, pkt->size); i++) {
+        av_log(s1, AV_LOG_WARNING, "%02x ", pkt->data[i]);
+      }
+      av_log(s1, AV_LOG_WARNING, "\n");
+      
+      // 检查 NAL unit 类型 (Annex B 格式: 00 00 00 01 或 00 00 01)
+      if (pkt->size >= 5) {
+        int nal_start = -1;
+        if (pkt->data[0] == 0 && pkt->data[1] == 0 && pkt->data[2] == 0 && pkt->data[3] == 1) {
+          nal_start = 4;
+        } else if (pkt->data[0] == 0 && pkt->data[1] == 0 && pkt->data[2] == 1) {
+          nal_start = 3;
+        }
+        
+        if (nal_start > 0 && pkt->size > nal_start) {
+          uint8_t nal_type = pkt->data[nal_start] & 0x1F;
+          const char *nal_name = "";
+          switch(nal_type) {
+            case 1: nal_name = "非IDR切片"; break;
+            case 5: nal_name = "IDR切片"; break;
+            case 6: nal_name = "SEI"; break;
+            case 7: nal_name = "SPS"; break;
+            case 8: nal_name = "PPS"; break;
+            case 9: nal_name = "分隔符"; break;
+            default: nal_name = "其他"; break;
+          }
+          av_log(s1, AV_LOG_WARNING, "[MXCam Debug] NAL 类型: %d (%s)\n", nal_type, nal_name);
+        }
+      }
+    }
+    
+    av_log(s1, AV_LOG_INFO, "[MXCam] [%lld ms] 接收视频包: stream_index=%d, pts=%" PRId64 ", dts=%" PRId64 ", 大小=%d 字节%s, codec=%s, 分辨率=%dx%d\n",
+           timestamp_ms, pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
            (pkt->flags & AV_PKT_FLAG_KEY) ? " [关键帧]" : "",
            avcodec_get_name(par->codec_id), par->width, par->height);
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
