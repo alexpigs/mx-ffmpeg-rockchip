@@ -1154,26 +1154,18 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
 
   MxContext *mx = (MxContext *)s1->priv_data;
 
-  // 打印接收到的 packet 信息
-  av_log(s1, AV_LOG_INFO, "[MXCam] 接收 packet: stream_index=%d, pts=%" PRId64 ", dts=%" PRId64 ", 大小=%d 字节, flags=0x%x%s\n",
-         pkt->stream_index, pkt->pts, pkt->dts, pkt->size, pkt->flags,
-         (pkt->flags & AV_PKT_FLAG_KEY) ? " [关键帧]" : "");
-
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
     AVCodecParameters *par = s1->streams[pkt->stream_index]->codecpar;
-    av_log(s1, AV_LOG_INFO, "[MXCam] -> 音频包, codec=%s, sample_rate=%d, channels=%d\n",
-           avcodec_get_name(par->codec_id), par->sample_rate, par->ch_layout.nb_channels);
     MxCamFrameCache::getInstance()->add_audio_frame(mx, par, pkt, pkt->data,
                                                     pkt->size);
-    // get bytes in 1 second
-
     return 0;
   } else if (pkt->stream_index == mx->video_stream_idx) {
     AVCodecParameters *par = s1->streams[mx->video_stream_idx]->codecpar;
-    av_log(s1, AV_LOG_INFO, "[MXCam] -> 视频包, codec=%s, 分辨率=%dx%d, format=%s\n",
-           avcodec_get_name(par->codec_id), par->width, par->height,
-           av_get_pix_fmt_name((enum AVPixelFormat)par->format));
+    av_log(s1, AV_LOG_INFO, "[MXCam] 接收视频包: stream_index=%d, pts=%" PRId64 ", dts=%" PRId64 ", 大小=%d 字节%s, codec=%s, 分辨率=%dx%d\n",
+           pkt->stream_index, pkt->pts, pkt->dts, pkt->size,
+           (pkt->flags & AV_PKT_FLAG_KEY) ? " [关键帧]" : "",
+           avcodec_get_name(par->codec_id), par->width, par->height);
     if (par->codec_id == AV_CODEC_ID_WRAPPED_AVFRAME) {
       return mxcam_add_video_packet(mx, par, pkt, (AVFrame *)pkt->data);
     }
