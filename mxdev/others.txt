@@ -54,4 +54,9 @@ https://github.com/paullouisageneau/libdatachannel/blob/master/README.md
 若需要安装到系统目录，可使用 cmake --install . --prefix /usr/local；否则直接把生成的 .a 文件和对应头文件加入 FFmpeg 的静态链接路径即可。
 
 
-sudo ./ffmpeg_g -loglevel info   -probesize 10M -analyzeduration 5000000  -reorder_queue_size 100  -hwaccel rkmpp -hwaccel_output_format drm_prime   -re -stream_loop -1   -f whep   -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream"   -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12"   -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo"   -f mxcam -phone 2 -
+sudo ./ffmpeg_g -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime   -re -stream_loop -1   -f whep   -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream"   -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12"   -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo"   -f mxcam -phone 2 -
+
+
+
+sudo ./ffmpeg_g -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime -re -stream_loop -1 -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -r 30 -f mxcam -phone 2 -
+

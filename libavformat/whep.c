@@ -1,6 +1,9 @@
 
 #include <rtc/rtc.h>
 #include <stdatomic.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/time.h>
 #include "avformat.h"
 #include "demux.h"
 #include "libavcodec/codec_id.h"
@@ -12,6 +15,19 @@
 #include "rtpdec.h"
 #include "whip_whep.h"
 
+// SDP_MAX_SIZE 已在 whip_whep.h 中定义
+/*
+暂时不处理音频，只处理视频
+*/
+
+// 获取当前时间戳（毫秒）
+static inline int64_t get_timestamp_ms(void) {
+    return av_gettime() / 1000;
+}
+
+// 日志宏，自动添加毫秒时间戳
+#define WHEP_LOG(ctx, level, fmt, ...) \
+    av_log(ctx, level, "[%lld ms] " fmt, (long long)get_timestamp_ms(), ##__VA_ARGS__)
 static const struct {
     int pt;
     const char enc_name[6];
@@ -28,15 +44,8 @@ static const struct {
   {-1, "", AVMEDIA_TYPE_UNKNOWN, AV_CODEC_ID_NONE, -1, -1}
 };
 
-static const char *audio_mline =
-    "m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8\n"
-    "a=mid:0\n"
-    "a=recvonly\n"
-    "a=rtpmap:111 opus/48000/2\n"
-    "a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1\n"
-    "a=rtpmap:9 G722/8000\n"
-    "a=rtpmap:0 PCMU/8000\n"
-    "a=rtpmap:8 PCMA/8000\n";
+// 已移除音频支持,只处理视频
+// static const char *audio_mline = ...
 
 static const char *video_mline =
     "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98 99\n"
@@ -75,7 +84,6 @@ typedef struct WHEPContext {
 
     // libdatachannel state
     int pc;
-    int audio_track;
     int video_track;
 
     RTPDemuxContext **rtp_ctxs;
@@ -87,7 +95,20 @@ typedef struct WHEPContext {
     atomic_int head;
     atomic_int tail;
 
-    AVPacket *audio_pkt;
+    // RTP processing thread
+    pthread_t rtp_thread;
+    atomic_int thread_should_stop;
+    
+    // Video packet queue (produced by thread, consumed by read_packet)
+    AVPacket **video_queue;
+    int video_queue_capacity;
+    atomic_int video_queue_head;
+    atomic_int video_queue_tail;
+    pthread_mutex_t video_queue_mutex;
+    pthread_cond_t video_queue_cond;
+    
+    // RTP contexts for video processing
+    RTPDemuxContext *video_rtp_ctx;
     AVPacket *video_pkt;
 } WHEPContext;
 
@@ -127,6 +148,98 @@ static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_ty
     return AVERROR(ENOENT);
 }
 
+// Forward declaration
+static RTPDemuxContext* whep_new_rtp_context(AVFormatContext *s, int payload_type);
+
+static int whep_parse_sdp_and_create_contexts(AVFormatContext *s)
+{
+    WHEPContext *whep = s->priv_data;
+    char answer[SDP_MAX_SIZE];
+    
+    // Get the remote SDP answer
+    if (rtcGetRemoteDescription(whep->pc, answer, sizeof(answer)) < 0) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to get remote description\n");
+        return AVERROR_EXTERNAL;
+    }
+    
+    WHEP_LOG(s, AV_LOG_DEBUG, "Parsing SDP answer: %s\n", answer);
+    
+    // Parse SDP and create RTP contexts for each media line
+    char *line, *next_line;
+    line = answer;
+    
+    while (line && *line) {
+        next_line = strchr(line, '\n');
+        if (next_line) {
+            *next_line = '\0';
+            next_line++;
+        }
+        
+        // Skip carriage return if present
+        if (line[strlen(line) - 1] == '\r') {
+            line[strlen(line) - 1] = '\0';
+        }
+        
+        // Check for media line (m=)
+        if (strncmp(line, "m=", 2) == 0) {
+            char media_type[16];
+            int port;
+            char protocol[16];
+            char fmt[256];
+            
+            if (sscanf(line, "m=%15s %d %15s %255s", media_type, &port, protocol, fmt) == 4) {
+                WHEP_LOG(s, AV_LOG_DEBUG, "Found media line: %s %d %s %s\n", 
+                       media_type, port, protocol, fmt);
+                
+                // Parse payload types - note that sscanf only reads first space-delimited token into fmt
+                // We need to manually parse all payload types from the line
+                char *pt_start = strstr(line, protocol);
+                if (pt_start) {
+                    pt_start = strchr(pt_start, ' '); // Skip protocol
+                    if (pt_start) {
+                        pt_start++; // Move past space
+                        
+                        // Now parse all payload types
+                        char *payload_str = pt_start;
+                        char *payload_end;
+                        
+                        while (payload_str && *payload_str) {
+                            // Skip whitespace
+                            while (*payload_str == ' ') payload_str++;
+                            if (*payload_str == '\0') break;
+                            
+                            int payload_type = atoi(payload_str);
+                            WHEP_LOG(s, AV_LOG_DEBUG, "Parsed payload type: %d from string '%s'\n", payload_type, payload_str);
+                            
+                            if (payload_type >= 0) {  // Changed from > 0 to >= 0 since PT 0 is valid
+                                WHEP_LOG(s, AV_LOG_DEBUG, "Creating RTP context for payload type %d\n", payload_type);
+                                
+                                RTPDemuxContext *rtp_ctx = whep_new_rtp_context(s, payload_type);
+                                if (!rtp_ctx) {
+                                    WHEP_LOG(s, AV_LOG_ERROR, "Failed to create RTP context for payload type %d\n", payload_type);
+                                    return AVERROR(ENOMEM);
+                                }
+                            }
+                            
+                            // Move to next payload type
+                            payload_end = strchr(payload_str, ' ');
+                            if (payload_end) {
+                                payload_str = payload_end + 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        line = next_line;
+    }
+    
+    return 0;
+}
+
 static RTPDemuxContext* whep_new_rtp_context(AVFormatContext *s, int payload_type)
 {
     WHEPContext *whep = s->priv_data;
@@ -137,29 +250,30 @@ static RTPDemuxContext* whep_new_rtp_context(AVFormatContext *s, int payload_typ
     PayloadContext *dynamic_protocol_context = NULL;
 
     rtp_ctxs = av_realloc_array(whep->rtp_ctxs, whep->rtp_ctxs_count + 1,
-                                           sizeof(*whep->rtp_ctxs));
+                                           sizeof(*whep->rtp_ctxs));    
     if (!rtp_ctxs) {
-        av_log(s, AV_LOG_ERROR, "Failed to allocate RTP context array\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate RTP context array\n");
         goto fail;
     }
     whep->rtp_ctxs = rtp_ctxs;
 
-    st = avformat_new_stream(s, NULL);
+    st = avformat_new_stream(s, NULL);    
     if (!st) {
-        av_log(s, AV_LOG_ERROR, "Failed to allocate stream\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate stream\n");
         goto fail;
     }
     if (ff_rtp_get_codec_info(st->codecpar, payload_type) < 0) {
         for (int i = 0; dynamic_payload_types[i].pt > 0; i++) {
             if (dynamic_payload_types[i].pt == payload_type) {
+                // 只处理视频codec
+                if (dynamic_payload_types[i].codec_type != AVMEDIA_TYPE_VIDEO) {
+                    WHEP_LOG(s, AV_LOG_WARNING, "Skipping non-video payload type %d\n", payload_type);
+                    goto fail;
+                }
+                
                 st->codecpar->codec_id   = dynamic_payload_types[i].codec_id;
                 st->codecpar->codec_type = dynamic_payload_types[i].codec_type;
 
-                if (dynamic_payload_types[i].audio_channels > 0) {
-                    av_channel_layout_uninit(&st->codecpar->ch_layout);
-                    st->codecpar->ch_layout.order       = AV_CHANNEL_ORDER_UNSPEC;
-                    st->codecpar->ch_layout.nb_channels = dynamic_payload_types[i].audio_channels;
-                }
                 if (dynamic_payload_types[i].clock_rate > 0)
                     st->codecpar->sample_rate = dynamic_payload_types[i].clock_rate;
                 handler = ff_rtp_handler_find_by_name(dynamic_payload_types[i].enc_name,
@@ -168,33 +282,57 @@ static RTPDemuxContext* whep_new_rtp_context(AVFormatContext *s, int payload_typ
             }
         }
     }
-    if (st->codecpar->sample_rate > 0)
+    
+    // 设置时间基准和帧率
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        // 对于视频流：
+        // - sample_rate 保留为 90000 (RTP 时钟频率，用于 RTP 解析)
+        // - time_base 设置为 1/90000 (用于 PTS 计算)
+        // - r_frame_rate 设置为合理的初始值 (用于显示和后续处理)
+        if (st->codecpar->sample_rate > 0) {
+            st->time_base = (AVRational){1, st->codecpar->sample_rate};
+        }
+        
+        // 设置时间基准为 1/90000 (RTP 时钟频率)
+        avpriv_set_pts_info(st, 33, 1, 90000);  // 33 bits PTS, timebase 1/90000
+        
+        // 推流源固定为 30fps，直接写死
+        st->r_frame_rate = (AVRational){30, 1};
+        st->avg_frame_rate = (AVRational){30, 1};
+        
+        WHEP_LOG(s, AV_LOG_INFO, "Video stream: timebase=%d/%d, r_frame_rate=%d/%d\n",
+               st->time_base.num, st->time_base.den,
+               st->r_frame_rate.num, st->r_frame_rate.den);
+    } else if (st->codecpar->sample_rate > 0) {
+        // 音频流（虽然当前不支持，但保留代码结构）
         st->time_base = (AVRational){1, st->codecpar->sample_rate};
+    }
 
-    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, RTP_REORDER_QUEUE_DEFAULT_SIZE);
+    // 使用更大的 jitter buffer (默认500太小，改为4096)
+    rtp_ctx = ff_rtp_parse_open(s, st, payload_type, 4096);    
     if (!rtp_ctx) {
-        av_log(s, AV_LOG_ERROR, "Failed to open RTP context\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to open RTP context\n");
         goto fail;
     }
     if (handler) {
         ffstream(st)->need_parsing = handler->need_parsing;
         dynamic_protocol_context = av_mallocz(handler->priv_data_size);
         if (!dynamic_protocol_context) {
-            av_log(s, AV_LOG_ERROR, "Failed to allocate dynamic protocol context\n");
+            WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate dynamic protocol context\n");
             goto fail;
         }
         if (handler->init && handler->init(s, st->index, dynamic_protocol_context) < 0) {
-            av_log(s, AV_LOG_ERROR, "Failed to initialize dynamic protocol context\n");
+            WHEP_LOG(s, AV_LOG_ERROR, "Failed to initialize dynamic protocol context\n");
             goto fail;
         }
         ff_rtp_parse_set_dynamic_protocol(rtp_ctx, dynamic_protocol_context, handler);
 
         if (handler->parse_sdp_a_line) {
             char line[SDP_MAX_SIZE];
-            int track_id = (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ?
-                          whep->audio_track : whep->video_track;
+            // 只处理视频track
+            int track_id = whep->video_track;
             if (whep_get_sdp_a_line(track_id, line, sizeof(line), payload_type) < 0) {
-                av_log(s, AV_LOG_WARNING, "No SDP a-line for payload type %d\n", payload_type);
+                WHEP_LOG(s, AV_LOG_WARNING, "No SDP a-line for payload type %d\n", payload_type);
             } else {
                 handler->parse_sdp_a_line(s, st->index, dynamic_protocol_context, line);
             }
@@ -211,22 +349,131 @@ fail:
     return NULL;
 }
 
+static void* rtp_processing_thread(void *arg)
+{
+    WHEPContext *whep = (WHEPContext *)arg;
+    int current_head, current_tail;
+    Message *msg = NULL;
+    int ret;
+    static int warn_count = 0;  // Counter for warnings
+    
+    WHEP_LOG(whep, AV_LOG_INFO, "[WHEP] RTP processing thread started\n");
+    
+    while (!atomic_load(&whep->thread_should_stop)) {
+        current_head = atomic_load_explicit(&whep->head, memory_order_relaxed);
+        current_tail = atomic_load_explicit(&whep->tail, memory_order_acquire);
+        
+        if (current_head == current_tail) {
+            // No messages, wait a bit
+            usleep(1000); // 1ms
+            continue;
+        }
+        
+        // Get message from ring buffer
+        msg = whep->buffer[current_head];
+        atomic_store_explicit(&whep->head, (current_head + 1) % whep->capacity,
+                             memory_order_release);
+        
+        // 只处理视频track
+        if (msg->track == whep->video_track && whep->video_rtp_ctx) {
+            WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] Processing video RTP packet (size=%d)\n", msg->size);
+            // Process RTP packet
+            ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, 
+                                     (uint8_t **)&msg->data, msg->size);
+            
+            WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet returned %d\n", ret);
+            
+            // 处理所有返回的包：ret=0(单包) 或 ret=1(还有更多缓冲包)
+            while (ret >= 0) {
+                // Got a complete frame, add to video queue
+                AVPacket *pkt = av_packet_alloc();
+                if (pkt) {
+                    av_packet_ref(pkt, whep->video_pkt);
+                    
+                    pthread_mutex_lock(&whep->video_queue_mutex);
+                    
+                    int queue_head = atomic_load(&whep->video_queue_head);
+                    int queue_tail = atomic_load(&whep->video_queue_tail);
+                    int next_tail = (queue_tail + 1) % whep->video_queue_capacity;
+                    
+                    if (next_tail != queue_head) {
+                        // Queue has space
+                        whep->video_queue[queue_tail] = pkt;
+                        atomic_store(&whep->video_queue_tail, next_tail);
+                        pthread_cond_signal(&whep->video_queue_cond);
+                        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] Got complete video frame, added to queue (size=%d, pts=%ld, queue_size=%d)\n", 
+                               pkt->size, pkt->pts, (next_tail - queue_head + whep->video_queue_capacity) % whep->video_queue_capacity);
+                    } else {
+                        // Queue full, drop oldest packet and add new one
+                        AVPacket *old_pkt = whep->video_queue[queue_head];
+                        if (old_pkt) {
+                            WHEP_LOG(whep, AV_LOG_WARNING, "[WHEP] Video queue full, dropping oldest frame (pts=%ld)\n", old_pkt->pts);
+                            av_packet_free(&old_pkt);
+                        }
+                        
+                        // Move head forward (drop oldest)
+                        int next_head = (queue_head + 1) % whep->video_queue_capacity;
+                        atomic_store(&whep->video_queue_head, next_head);
+                        
+                        // Add new packet at tail
+                        whep->video_queue[queue_tail] = pkt;
+                        atomic_store(&whep->video_queue_tail, next_tail);
+                        pthread_cond_signal(&whep->video_queue_cond);
+                    }
+                    
+                    pthread_mutex_unlock(&whep->video_queue_mutex);
+                }
+                
+                // 如果 ret == 1，说明还有更多缓冲的包，继续读取
+                if (ret == 1) {
+                    ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, NULL, 0);
+                    WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet (buffered) returned %d\n", ret);
+                } else {
+                    // ret == 0，没有更多缓冲包了
+                    break;
+                }
+            }
+        } else {
+            // Unknown track or RTP context not ready
+            if (warn_count++ % 100 == 0) {
+                WHEP_LOG(whep, AV_LOG_WARNING, "[WHEP] Unknown track or RTP context not available (msg_track=%d, video_track=%d, video_ctx=%p)\n", 
+                       msg->track, whep->video_track, (void*)whep->video_rtp_ctx);
+            }
+        }
+        
+        // Free message
+        av_free(msg->data);
+        av_free(msg);
+    }
+    
+    WHEP_LOG(whep, AV_LOG_INFO, "[WHEP] RTP processing thread stopped\n");
+    return NULL;
+}
+
 static void message_callback(int id, const char *message, int size, void *ptr)
 {
     WHEPContext *whep = ptr;
     Message *msg;
     int current_head, next, current_tail;
 
-    if (size < 2)
+    if (size < 2) {
+        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: size too small (%d)\n", size);
         return;
+    }
 
-    if (RTP_PT_IS_RTCP(message[1]) && size < 8 || size < 12)
+    // Log all incoming packets
+    WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: track=%d, size=%d, video_track=%d, PT=%d\n",
+           id, size, whep->video_track, message[1] & 0x7F);
+
+    if (RTP_PT_IS_RTCP(message[1]) && size < 8 || size < 12) {
+        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: skipping RTCP or invalid packet\n");
         return;
+    }
 
     // Push packet to ring buffer
     msg = av_malloc(sizeof(Message));
     if (!msg) {
-        av_log(whep, AV_LOG_ERROR, "Failed to allocate message\n");
+        WHEP_LOG(whep, AV_LOG_ERROR, "Failed to allocate message\n");
         return;
     }
     msg->track = id;
@@ -234,7 +481,7 @@ static void message_callback(int id, const char *message, int size, void *ptr)
     msg->size  = size;
 
     if (!msg->data) {
-        av_log(whep, AV_LOG_ERROR, "Failed to duplicate message\n");
+        WHEP_LOG(whep, AV_LOG_ERROR, "Failed to duplicate message\n");
         av_free(msg);
         return;
     }
@@ -243,7 +490,7 @@ static void message_callback(int id, const char *message, int size, void *ptr)
     current_head = atomic_load_explicit(&whep->head, memory_order_acquire);
 
     if (next == current_head) {
-        av_log(whep, AV_LOG_ERROR, "Message buffer is full\n");
+        WHEP_LOG(whep, AV_LOG_ERROR, "Message buffer is full\n");
         av_free(msg->data);
         av_free(msg);
         return;
@@ -256,206 +503,191 @@ static void message_callback(int id, const char *message, int size, void *ptr)
 static int whep_read_header(AVFormatContext *s)
 {
     WHEPContext *whep = s->priv_data;
+    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] whep_read_header called\n");
     rtcConfiguration config = {0};
 
     ff_whip_whep_init_rtc_logger();
     s->ctx_flags |= AVFMTCTX_NOHEADER;
 
-    whep->capacity = 1024;
+    // 增大 jitter buffer 以应对网络抖动和处理延迟
+    whep->capacity = 4096;  // 从 1024 增加到 4096
     whep->buffer = av_calloc(whep->capacity, sizeof(*whep->buffer));
     if (!whep->buffer) {
-        av_log(s, AV_LOG_ERROR, "Failed to allocate message buffer\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate message buffer\n");
         return AVERROR(ENOMEM);
     }
+    
+    // Initialize video packet queue - 增大队列以减少丢帧
+    whep->video_queue_capacity = 128;  // 从 32 增加到 128
+    whep->video_queue = av_calloc(whep->video_queue_capacity, sizeof(*whep->video_queue));
+    if (!whep->video_queue) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate video queue\n");
+        return AVERROR(ENOMEM);
+    }
+    
+    atomic_init(&whep->video_queue_head, 0);
+    atomic_init(&whep->video_queue_tail, 0);
+    atomic_init(&whep->thread_should_stop, 0);
+    
+    if (pthread_mutex_init(&whep->video_queue_mutex, NULL) != 0) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to initialize video queue mutex\n");
+        return AVERROR(ENOMEM);
+    }
+    
+    if (pthread_cond_init(&whep->video_queue_cond, NULL) != 0) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to initialize video queue condition\n");
+        return AVERROR(ENOMEM);
+    }
+    
+    // Allocate video packet for RTP processing
+    whep->video_pkt = av_packet_alloc();
+    if (!whep->video_pkt) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate video packet\n");
+        return AVERROR(ENOMEM);
+    }
+    
+    // 已移除音频支持
+    
     // Initialize WebRTC peer connection
     whep->pc = rtcCreatePeerConnection(&config);
     if (whep->pc <= 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to create peer connection\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to create peer connection\n");
         return AVERROR_EXTERNAL;
     }
     rtcSetUserPointer(whep->pc, whep);
 
-    // Add audio and video track
-    whep->audio_track = rtcAddTrack(whep->pc, audio_mline);
-    if (whep->audio_track <= 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to add audio track\n");
-        return AVERROR_EXTERNAL;
-    }
-
-    if (rtcSetMessageCallback(whep->audio_track, message_callback) < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to set audio track message callback\n");
-        return AVERROR_EXTERNAL;
-    }
-
+    // 只添加视频track
     whep->video_track = rtcAddTrack(whep->pc, video_mline);
     if (whep->video_track <= 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to add video track\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to add video track\n");
         return AVERROR_EXTERNAL;
     }
 
     if (rtcSetMessageCallback(whep->video_track, message_callback) < 0) {
-        av_log(s, AV_LOG_ERROR, "Failed to set video track message callback\n");
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to set video track message callback\n");
         return AVERROR_EXTERNAL;
     }
 
-    return ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url);
+    int ret = ff_whip_whep_exchange_and_set_sdp(s, whep->pc, whep->token, &whep->session_url);
+    if (ret < 0) {
+        return ret;
+    }
+    
+    // Parse SDP and create RTP contexts
+    ret = whep_parse_sdp_and_create_contexts(s);
+    if (ret < 0) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to parse SDP and create RTP contexts\n");
+        return ret;
+    }
+    
+    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] Created %d streams, %d RTP contexts\n", 
+           s->nb_streams, whep->rtp_ctxs_count);
+    for (int i = 0; i < s->nb_streams; i++) {
+        WHEP_LOG(s, AV_LOG_INFO, "[WHEP] Stream %d: codec_type=%d (%s), codec_id=%d\n",
+               i, s->streams[i]->codecpar->codec_type,
+               av_get_media_type_string(s->streams[i]->codecpar->codec_type),
+               s->streams[i]->codecpar->codec_id);
+    }
+    
+    // Start RTP processing thread
+    if (pthread_create(&whep->rtp_thread, NULL, rtp_processing_thread, whep) != 0) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to create RTP processing thread\n");
+        return AVERROR(ENOMEM);
+    }
+    
+    return 0;
 }
 
 static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     WHEPContext *whep = s->priv_data;
-    int current_head, current_tail, ret;
-    Message *msg = NULL;
-    RTPDemuxContext *rtp_ctx = NULL;
-    AVIOContext *dyn_bc = NULL;
-    if (!whep->audio_pkt)
-        whep->audio_pkt = av_packet_alloc();
-    if (!whep->video_pkt)
-        whep->video_pkt = av_packet_alloc();
-
-redo:
-    rtp_ctx = NULL;
-    if (msg) {
-        av_free(msg->data);
-        av_free(msg);
-    }
-    if (rtcIsClosed(whep->audio_track) || rtcIsClosed(whep->video_track)) {
-        av_log(s, AV_LOG_ERROR, "Connection closed\n");
+    AVPacket *video_pkt = NULL;
+    
+    if (rtcIsClosed(whep->video_track)) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Connection closed\n");
         return AVERROR_EOF;
     }
-
-    current_head = atomic_load_explicit(&whep->head, memory_order_relaxed);
-    current_tail = atomic_load_explicit(&whep->tail, memory_order_acquire);
-
-    if (current_head == current_tail)  // empty
-        return AVERROR(EAGAIN);
     
-    // 计算ring buffer中待处理的消息数量
-    int pending = (current_tail - current_head + whep->capacity) % whep->capacity;
-    if (pending > 10) {
-        av_log(s, AV_LOG_WARNING, "[WHEP] Ring buffer 积压: %d 个消息待处理\n", pending);
-    }
-    
-    msg = whep->buffer[current_head];
-    atomic_store_explicit(&whep->head, (current_head + 1) % whep->capacity,
-                         memory_order_release);
-
-    if (RTP_PT_IS_RTCP(msg->data[1])) {
-        switch(msg->data[1]) {
-        case RTCP_SR:
-            uint32_t ssrc = (msg->data[4] << 24) | (msg->data[5] << 16) | (msg->data[6] << 8) | msg->data[7];
-            for (int i = 0; i < whep->rtp_ctxs_count; i++) {
-                if (whep->rtp_ctxs[i]->ssrc == ssrc) {
-                    rtp_ctx = whep->rtp_ctxs[i];
-                    break;
-                }
-            }
-            // Send RTCP RR
-            if (rtp_ctx && avio_open_dyn_buf(&dyn_bc) == 0) {
-                int len;
-                uint8_t *dyn_buf = NULL;
-                ff_rtp_check_and_send_back_rr(rtp_ctx, NULL, dyn_bc, 300000);
-                len = avio_close_dyn_buf(dyn_bc, &dyn_buf);
-                if (len > 0 && dyn_buf && rtcSendMessage(msg->track, dyn_buf, len) < 0)
-                    av_log(s, AV_LOG_ERROR, "Failed to send RTCP RR\n");
-                av_free(dyn_buf);
-            }
-            break;
-        default:
-            goto redo;
-        }
-    } else {
-        int payload_type = msg->data[1] & 0x7f;
+    // Set up video RTP context if not already done
+    if (!whep->video_rtp_ctx) {
+        WHEP_LOG(s, AV_LOG_INFO, "[WHEP] Searching for streams: nb_streams=%d, rtp_ctxs_count=%d\n",
+               s->nb_streams, whep->rtp_ctxs_count);
+        
+        // Find video RTP context
         for (int i = 0; i < whep->rtp_ctxs_count; i++) {
-            if (whep->rtp_ctxs[i]->payload_type == payload_type) {
-                rtp_ctx = whep->rtp_ctxs[i];
-                break;
-            }
-        }
-
-        if (!rtp_ctx) {
-            AVCodecParameters par;
-            ret = ff_rtp_get_codec_info(&par, payload_type);
-            if (ret < 0) {
-                for (int i = 0; dynamic_payload_types[i].pt > 0; i++) {
-                    if (dynamic_payload_types[i].pt == payload_type) {
-                        ret = 0;
-                        break;
-                    }
+            if (whep->rtp_ctxs[i] && whep->rtp_ctxs[i]->st) {
+                WHEP_LOG(s, AV_LOG_INFO, "[WHEP] RTP context %d: stream_index=%d, codec_type=%d, payload_type=%d\n",
+                       i, whep->rtp_ctxs[i]->st->index, 
+                       whep->rtp_ctxs[i]->st->codecpar->codec_type,
+                       whep->rtp_ctxs[i]->payload_type);
+                
+                if (whep->rtp_ctxs[i]->st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !whep->video_rtp_ctx) {
+                    whep->video_rtp_ctx = whep->rtp_ctxs[i];
+                    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] Using video RTP context for payload type %d, stream_index=%d\n", 
+                           whep->video_rtp_ctx->payload_type,
+                           whep->video_rtp_ctx->st->index);
                 }
             }
-            if (ret == 0) {
-                av_log(s, AV_LOG_DEBUG, "Create RTP context for payload type %d\n", payload_type);
-                rtp_ctx = whep_new_rtp_context(s, payload_type);
-            }
         }
     }
-
-    if (!rtp_ctx) {
-        av_log(s, AV_LOG_WARNING, "Failed to get RTP context for message %d\n", msg->data[1]);
-        goto redo;
+    
+    // Get packet from video queue
+    int video_queue_head, video_queue_tail;
+    
+    // Check video queue
+    pthread_mutex_lock(&whep->video_queue_mutex);
+    video_queue_head = atomic_load(&whep->video_queue_head);
+    video_queue_tail = atomic_load(&whep->video_queue_tail);
+    if (video_queue_head != video_queue_tail) {
+        video_pkt = whep->video_queue[video_queue_head];
     }
-
-    // Parse RTP packet
-    if (msg->track == whep->audio_track)
-        ret = ff_rtp_parse_packet(rtp_ctx, whep->audio_pkt, (uint8_t **)&msg->data, msg->size);
-    else if (msg->track == whep->video_track)
-        ret = ff_rtp_parse_packet(rtp_ctx, whep->video_pkt, (uint8_t **)&msg->data, msg->size);
-    else
-        ret = -1;  // 未知track类型
-
-    // Send RTCP feedback
-    if (avio_open_dyn_buf(&dyn_bc) == 0) {
-        int len;
-        uint8_t *dyn_buf = NULL;
-        ff_rtp_send_rtcp_feedback(rtp_ctx, NULL, dyn_bc);
-        len = avio_close_dyn_buf(dyn_bc, &dyn_buf);
-        if (len > 0 && dyn_buf && rtcSendMessage(msg->track, dyn_buf, len) < 0)
-            av_log(s, AV_LOG_ERROR, "Failed to send RTCP feedback\n");
-        av_free(dyn_buf);
-    }
-
-    // Send PLI
-    if (msg->track == whep->video_track && rtp_ctx->ssrc) {
-        int64_t now = av_gettime_relative();
-        if ((whep->pli_period && now - whep->last_pli_time >= whep->pli_period * 1000000) ||
-            (rtp_ctx->handler && rtp_ctx->handler->need_keyframe &&
-            rtp_ctx->handler->need_keyframe(rtp_ctx->dynamic_protocol_context))) {
-            uint32_t source_ssrc = rtp_ctx->ssrc;
-            uint32_t sender_ssrc = source_ssrc + 1;
-            uint8_t pli_packet[] = {
-                (RTP_VERSION << 6) | 1, RTCP_PSFB,         0x00,             0x02,
-                sender_ssrc >> 24,      sender_ssrc >> 16, sender_ssrc >> 8, sender_ssrc,
-                source_ssrc >> 24,      source_ssrc >> 16, source_ssrc >> 8, source_ssrc,
-            };
-            if (rtcSendMessage(msg->track, pli_packet, sizeof(pli_packet)) < 0)
-                av_log(s, AV_LOG_ERROR, "Failed to send PLI\n");
-            else
-                whep->last_pli_time = now;
+    pthread_mutex_unlock(&whep->video_queue_mutex);
+    
+    // WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet called: head=%d, tail=%d, has_pkt=%d\n",
+    //          video_queue_head, video_queue_tail, video_pkt != NULL);
+    
+    // If no data, wait for packet
+    if (!video_pkt) {
+        struct timespec ts;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        ts.tv_sec = tv.tv_sec;
+        ts.tv_nsec = tv.tv_usec * 1000 + 10000000; // 10ms timeout
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
         }
+        
+        // Wait on video queue with timeout
+        pthread_mutex_lock(&whep->video_queue_mutex);
+        pthread_cond_timedwait(&whep->video_queue_cond, &whep->video_queue_mutex, &ts);
+        pthread_mutex_unlock(&whep->video_queue_mutex);
+        
+        // WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet returning EAGAIN (no packet)\n");
+        return AVERROR(EAGAIN);
     }
-
-    // ret < 0: 没有packet（错误或需要更多RTP包），继续读取下一个消息
-    // ret >= 0: 有完整的packet可以返回
-    if (ret < 0) {
-        av_log(s, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet 返回 %d，需要更多RTP包\n", ret);
-        goto redo;
+    
+    // Remove packet from queue and return it
+    pthread_mutex_lock(&whep->video_queue_mutex);
+    atomic_store(&whep->video_queue_head, (video_queue_head + 1) % whep->video_queue_capacity);
+    pthread_mutex_unlock(&whep->video_queue_mutex);
+    
+    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] 返回视频包: stream_index=%d, pts=%" PRId64 ", size=%d, keyframe=%d\n",
+           video_pkt->stream_index, video_pkt->pts, video_pkt->size, 
+           !!(video_pkt->flags & AV_PKT_FLAG_KEY));
+    
+    av_packet_ref(pkt, video_pkt);
+    av_packet_free(&video_pkt);
+    
+    // Verify stream index is valid
+    if (pkt->stream_index < 0 || pkt->stream_index >= s->nb_streams) {
+        WHEP_LOG(s, AV_LOG_ERROR, "[WHEP] Invalid stream_index %d (nb_streams=%d)\n", 
+               pkt->stream_index, s->nb_streams);
+        av_packet_unref(pkt);
+        return AVERROR(EINVAL);
     }
-
-    if (msg->track == whep->audio_track) {
-        av_log(s, AV_LOG_DEBUG, "[WHEP] 返回音频包: pts=%" PRId64 ", size=%d\n", 
-               whep->audio_pkt->pts, whep->audio_pkt->size);
-        av_packet_ref(pkt, whep->audio_pkt);
-        av_packet_free(&whep->audio_pkt);
-    } else if (msg->track == whep->video_track) {
-        av_log(s, AV_LOG_DEBUG, "[WHEP] 返回视频包: pts=%" PRId64 ", size=%d, keyframe=%d\n",
-               whep->video_pkt->pts, whep->video_pkt->size, 
-               !!(whep->video_pkt->flags & AV_PKT_FLAG_KEY));
-        av_packet_ref(pkt, whep->video_pkt);
-        av_packet_free(&whep->video_pkt);
-    }
-    av_free(msg->data);
-    av_free(msg);
+    
+    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet returning SUCCESS\n");
     return 0;
 }
 
@@ -463,10 +695,14 @@ static int whep_read_close(AVFormatContext *s)
 {
     WHEPContext *whep = s->priv_data;
 
-    if (whep->audio_track > 0) {
-        rtcDeleteTrack(whep->audio_track);
-        whep->audio_track = 0;
+    // Stop RTP processing thread
+    if (whep->rtp_thread) {
+        atomic_store(&whep->thread_should_stop, 1);
+        pthread_cond_signal(&whep->video_queue_cond); // Wake up thread if waiting
+        pthread_join(whep->rtp_thread, NULL);
+        whep->rtp_thread = 0;
     }
+
     if (whep->video_track > 0) {
         rtcDeleteTrack(whep->video_track);
         whep->video_track = 0;
@@ -488,6 +724,24 @@ static int whep_read_close(AVFormatContext *s)
         whep->rtp_ctxs_count = 0;
     }
 
+    // Clean up video queue
+    if (whep->video_queue) {
+        int head = atomic_load(&whep->video_queue_head);
+        int tail = atomic_load(&whep->video_queue_tail);
+        
+        while (head != tail) {
+            AVPacket *pkt = whep->video_queue[head];
+            if (pkt) {
+                av_packet_free(&pkt);
+            }
+            head = (head + 1) % whep->video_queue_capacity;
+        }
+        av_freep(&whep->video_queue);
+    }
+    
+    pthread_mutex_destroy(&whep->video_queue_mutex);
+    pthread_cond_destroy(&whep->video_queue_cond);
+
     if (whep->buffer) {
         int head = atomic_load(&whep->head);
         int tail = atomic_load(&whep->tail);
@@ -503,8 +757,6 @@ static int whep_read_close(AVFormatContext *s)
         av_freep(&whep->buffer);
     }
 
-    if (whep->audio_pkt)
-        av_packet_free(&whep->audio_pkt);
     if (whep->video_pkt)
         av_packet_free(&whep->video_pkt);
 
