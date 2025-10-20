@@ -69,12 +69,6 @@ static const char *video_mline =
     "a=rtcp-fb:99 nack\n"
     "a=rtcp-fb:99 nack pli\n";
 
-typedef struct Message {
-    int track;
-    uint8_t *data;
-    int size;
-} Message;
-
 typedef struct WHEPContext {
     AVClass *class;
     char *token;
@@ -88,18 +82,8 @@ typedef struct WHEPContext {
 
     RTPDemuxContext **rtp_ctxs;
     int rtp_ctxs_count;
-
-    // lock-free ring buffer for messages (rtp packets)
-    Message **buffer;
-    int capacity;
-    atomic_int head;
-    atomic_int tail;
-
-    // RTP processing thread
-    pthread_t rtp_thread;
-    atomic_int thread_should_stop;
     
-    // Video packet queue (produced by thread, consumed by read_packet)
+    // Video packet queue (produced by callback, consumed by read_packet)
     AVPacket **video_queue;
     int video_queue_capacity;
     atomic_int video_queue_head;
@@ -110,6 +94,9 @@ typedef struct WHEPContext {
     // RTP contexts for video processing
     RTPDemuxContext *video_rtp_ctx;
     AVPacket *video_pkt;
+    
+    // Format context pointer for logging in callback
+    AVFormatContext *fmt_ctx;
 } WHEPContext;
 
 static int whep_get_sdp_a_line(int track, char *buffer, int size, int payload_type)
@@ -349,155 +336,97 @@ fail:
     return NULL;
 }
 
-static void* rtp_processing_thread(void *arg)
-{
-    WHEPContext *whep = (WHEPContext *)arg;
-    int current_head, current_tail;
-    Message *msg = NULL;
-    int ret;
-    static int warn_count = 0;  // Counter for warnings
-    
-    WHEP_LOG(whep, AV_LOG_INFO, "[WHEP] RTP processing thread started\n");
-    
-    while (!atomic_load(&whep->thread_should_stop)) {
-        current_head = atomic_load_explicit(&whep->head, memory_order_relaxed);
-        current_tail = atomic_load_explicit(&whep->tail, memory_order_acquire);
-        
-        if (current_head == current_tail) {
-            // No messages, wait a bit
-            usleep(1000); // 1ms
-            continue;
-        }
-        
-        // Get message from ring buffer
-        msg = whep->buffer[current_head];
-        atomic_store_explicit(&whep->head, (current_head + 1) % whep->capacity,
-                             memory_order_release);
-        
-        // 只处理视频track
-        if (msg->track == whep->video_track && whep->video_rtp_ctx) {
-            WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] Processing video RTP packet (size=%d)\n", msg->size);
-            // Process RTP packet
-            ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, 
-                                     (uint8_t **)&msg->data, msg->size);
-            
-            WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet returned %d\n", ret);
-            
-            // 处理所有返回的包：ret=0(单包) 或 ret=1(还有更多缓冲包)
-            while (ret >= 0) {
-                // Got a complete frame, add to video queue
-                AVPacket *pkt = av_packet_alloc();
-                if (pkt) {
-                    av_packet_ref(pkt, whep->video_pkt);
-                    
-                    pthread_mutex_lock(&whep->video_queue_mutex);
-                    
-                    int queue_head = atomic_load(&whep->video_queue_head);
-                    int queue_tail = atomic_load(&whep->video_queue_tail);
-                    int next_tail = (queue_tail + 1) % whep->video_queue_capacity;
-                    
-                    if (next_tail != queue_head) {
-                        // Queue has space
-                        whep->video_queue[queue_tail] = pkt;
-                        atomic_store(&whep->video_queue_tail, next_tail);
-                        pthread_cond_signal(&whep->video_queue_cond);
-                        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] Got complete video frame, added to queue (size=%d, pts=%ld, queue_size=%d)\n", 
-                               pkt->size, pkt->pts, (next_tail - queue_head + whep->video_queue_capacity) % whep->video_queue_capacity);
-                    } else {
-                        // Queue full, drop oldest packet and add new one
-                        AVPacket *old_pkt = whep->video_queue[queue_head];
-                        if (old_pkt) {
-                            WHEP_LOG(whep, AV_LOG_WARNING, "[WHEP] Video queue full, dropping oldest frame (pts=%ld)\n", old_pkt->pts);
-                            av_packet_free(&old_pkt);
-                        }
-                        
-                        // Move head forward (drop oldest)
-                        int next_head = (queue_head + 1) % whep->video_queue_capacity;
-                        atomic_store(&whep->video_queue_head, next_head);
-                        
-                        // Add new packet at tail
-                        whep->video_queue[queue_tail] = pkt;
-                        atomic_store(&whep->video_queue_tail, next_tail);
-                        pthread_cond_signal(&whep->video_queue_cond);
-                    }
-                    
-                    pthread_mutex_unlock(&whep->video_queue_mutex);
-                }
-                
-                // 如果 ret == 1，说明还有更多缓冲的包，继续读取
-                if (ret == 1) {
-                    ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, NULL, 0);
-                    WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet (buffered) returned %d\n", ret);
-                } else {
-                    // ret == 0，没有更多缓冲包了
-                    break;
-                }
-            }
-        } else {
-            // Unknown track or RTP context not ready
-            if (warn_count++ % 100 == 0) {
-                WHEP_LOG(whep, AV_LOG_WARNING, "[WHEP] Unknown track or RTP context not available (msg_track=%d, video_track=%d, video_ctx=%p)\n", 
-                       msg->track, whep->video_track, (void*)whep->video_rtp_ctx);
-            }
-        }
-        
-        // Free message
-        av_free(msg->data);
-        av_free(msg);
-    }
-    
-    WHEP_LOG(whep, AV_LOG_INFO, "[WHEP] RTP processing thread stopped\n");
-    return NULL;
-}
-
 static void message_callback(int id, const char *message, int size, void *ptr)
 {
     WHEPContext *whep = ptr;
-    Message *msg;
-    int current_head, next, current_tail;
+    AVFormatContext *s = whep->fmt_ctx;
+    int ret;
+    uint8_t *data;
+    static int warn_count = 0;
 
     if (size < 2) {
-        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: size too small (%d)\n", size);
+        WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] message_callback: size too small (%d)\n", size);
         return;
     }
-
-    // Log all incoming packets
-    WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: track=%d, size=%d, video_track=%d, PT=%d\n",
-           id, size, whep->video_track, message[1] & 0x7F);
 
     if (RTP_PT_IS_RTCP(message[1]) && size < 8 || size < 12) {
-        WHEP_LOG(whep, AV_LOG_DEBUG, "[WHEP] message_callback: skipping RTCP or invalid packet\n");
+        WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] message_callback: skipping RTCP or invalid packet\n");
         return;
     }
 
-    // Push packet to ring buffer
-    msg = av_malloc(sizeof(Message));
-    if (!msg) {
-        WHEP_LOG(whep, AV_LOG_ERROR, "Failed to allocate message\n");
-        return;
-    }
-    msg->track = id;
-    msg->data  = av_memdup(message, size);
-    msg->size  = size;
-
-    if (!msg->data) {
-        WHEP_LOG(whep, AV_LOG_ERROR, "Failed to duplicate message\n");
-        av_free(msg);
-        return;
-    }
-    current_tail = atomic_load_explicit(&whep->tail, memory_order_relaxed);
-    next         = (current_tail + 1) % whep->capacity;
-    current_head = atomic_load_explicit(&whep->head, memory_order_acquire);
-
-    if (next == current_head) {
-        WHEP_LOG(whep, AV_LOG_ERROR, "Message buffer is full\n");
-        av_free(msg->data);
-        av_free(msg);
+    // 只处理视频track
+    if (id != whep->video_track || !whep->video_rtp_ctx) {
+        if (warn_count++ % 100 == 0) {
+            WHEP_LOG(s, AV_LOG_WARNING, "[WHEP] Unknown track or RTP context not available (track=%d, video_track=%d, video_ctx=%p)\n", 
+                   id, whep->video_track, (void*)whep->video_rtp_ctx);
+        }
         return;
     }
 
-    whep->buffer[current_tail] = msg;
-    atomic_store_explicit(&whep->tail, next, memory_order_release);
+    // 复制数据供 ff_rtp_parse_packet 使用
+    data = av_memdup(message, size);
+    if (!data) {
+        WHEP_LOG(s, AV_LOG_ERROR, "Failed to duplicate RTP packet\n");
+        return;
+    }
+
+    // 直接调用 ff_rtp_parse_packet
+    ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, &data, size);
+    
+    
+    // 处理所有返回的包：ret=0(单包) 或 ret=1(还有更多缓冲包)
+    while (ret >= 0) {
+        // Got a complete frame, add to video queue
+        WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet returned %d\n", ret);
+        AVPacket *pkt = av_packet_alloc();
+        if (pkt) {
+            av_packet_ref(pkt, whep->video_pkt);
+            
+            pthread_mutex_lock(&whep->video_queue_mutex);
+            
+            int queue_head = atomic_load(&whep->video_queue_head);
+            int queue_tail = atomic_load(&whep->video_queue_tail);
+            int next_tail = (queue_tail + 1) % whep->video_queue_capacity;
+            
+            if (next_tail != queue_head) {
+                // Queue has space
+                whep->video_queue[queue_tail] = pkt;
+                atomic_store(&whep->video_queue_tail, next_tail);
+                pthread_cond_signal(&whep->video_queue_cond);
+                WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] Got complete video frame, added to queue (size=%d, pts=%ld, queue_size=%d)\n", 
+                       pkt->size, pkt->pts, (next_tail - queue_head + whep->video_queue_capacity) % whep->video_queue_capacity);
+            } else {
+                // Queue full, drop oldest packet and add new one
+                AVPacket *old_pkt = whep->video_queue[queue_head];
+                if (old_pkt) {
+                    WHEP_LOG(s, AV_LOG_WARNING, "[WHEP] Video queue full, dropping oldest frame (pts=%ld)\n", old_pkt->pts);
+                    av_packet_free(&old_pkt);
+                }
+                
+                // Move head forward (drop oldest)
+                int next_head = (queue_head + 1) % whep->video_queue_capacity;
+                atomic_store(&whep->video_queue_head, next_head);
+                
+                // Add new packet at tail
+                whep->video_queue[queue_tail] = pkt;
+                atomic_store(&whep->video_queue_tail, next_tail);
+                pthread_cond_signal(&whep->video_queue_cond);
+            }
+            
+            pthread_mutex_unlock(&whep->video_queue_mutex);
+        }
+        
+        // 如果 ret == 1，说明还有更多缓冲的包，继续读取
+        if (ret == 1) {
+            ret = ff_rtp_parse_packet(whep->video_rtp_ctx, whep->video_pkt, NULL, 0);
+            WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] ff_rtp_parse_packet (buffered) returned %d\n", ret);
+        } else {
+            // ret == 0，没有更多缓冲包了
+            break;
+        }
+    }
+    
+    av_free(data);
 }
 
 static int whep_read_header(AVFormatContext *s)
@@ -509,13 +438,8 @@ static int whep_read_header(AVFormatContext *s)
     ff_whip_whep_init_rtc_logger();
     s->ctx_flags |= AVFMTCTX_NOHEADER;
 
-    // 增大 jitter buffer 以应对网络抖动和处理延迟
-    whep->capacity = 4096;  // 从 1024 增加到 4096
-    whep->buffer = av_calloc(whep->capacity, sizeof(*whep->buffer));
-    if (!whep->buffer) {
-        WHEP_LOG(s, AV_LOG_ERROR, "Failed to allocate message buffer\n");
-        return AVERROR(ENOMEM);
-    }
+    // 保存格式上下文指针供 callback 使用
+    whep->fmt_ctx = s;
     
     // Initialize video packet queue - 增大队列以减少丢帧
     whep->video_queue_capacity = 128;  // 从 32 增加到 128
@@ -527,7 +451,6 @@ static int whep_read_header(AVFormatContext *s)
     
     atomic_init(&whep->video_queue_head, 0);
     atomic_init(&whep->video_queue_tail, 0);
-    atomic_init(&whep->thread_should_stop, 0);
     
     if (pthread_mutex_init(&whep->video_queue_mutex, NULL) != 0) {
         WHEP_LOG(s, AV_LOG_ERROR, "Failed to initialize video queue mutex\n");
@@ -589,12 +512,6 @@ static int whep_read_header(AVFormatContext *s)
                s->streams[i]->codecpar->codec_id);
     }
     
-    // Start RTP processing thread
-    if (pthread_create(&whep->rtp_thread, NULL, rtp_processing_thread, whep) != 0) {
-        WHEP_LOG(s, AV_LOG_ERROR, "Failed to create RTP processing thread\n");
-        return AVERROR(ENOMEM);
-    }
-    
     return 0;
 }
 
@@ -632,51 +549,34 @@ static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
     }
     
     // Get packet from video queue
-    int video_queue_head, video_queue_tail;
-    
-    // Check video queue
     pthread_mutex_lock(&whep->video_queue_mutex);
-    video_queue_head = atomic_load(&whep->video_queue_head);
-    video_queue_tail = atomic_load(&whep->video_queue_tail);
-    if (video_queue_head != video_queue_tail) {
-        video_pkt = whep->video_queue[video_queue_head];
-    }
-    pthread_mutex_unlock(&whep->video_queue_mutex);
     
-    // WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet called: head=%d, tail=%d, has_pkt=%d\n",
-    //          video_queue_head, video_queue_tail, video_pkt != NULL);
+    int video_queue_head = atomic_load(&whep->video_queue_head);
+    int video_queue_tail = atomic_load(&whep->video_queue_tail);
     
-    // If no data, wait for packet
-    if (!video_pkt) {
-        struct timespec ts;
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        ts.tv_sec = tv.tv_sec;
-        ts.tv_nsec = tv.tv_usec * 1000 + 10000000; // 10ms timeout
-        if (ts.tv_nsec >= 1000000000) {
-            ts.tv_sec++;
-            ts.tv_nsec -= 1000000000;
-        }
-        
-        // Wait on video queue with timeout
-        pthread_mutex_lock(&whep->video_queue_mutex);
-        pthread_cond_timedwait(&whep->video_queue_cond, &whep->video_queue_mutex, &ts);
+    // Check if queue is empty
+    if (video_queue_head == video_queue_tail) {
         pthread_mutex_unlock(&whep->video_queue_mutex);
-        
-        // WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet returning EAGAIN (no packet)\n");
+        // WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] No packet available, returning EAGAIN\n");
         return AVERROR(EAGAIN);
     }
     
-    // Remove packet from queue and return it
-    pthread_mutex_lock(&whep->video_queue_mutex);
+    // Get packet from queue
+    video_pkt = whep->video_queue[video_queue_head];
+    whep->video_queue[video_queue_head] = NULL;
+    
+    // Update head pointer
     atomic_store(&whep->video_queue_head, (video_queue_head + 1) % whep->video_queue_capacity);
+    
     pthread_mutex_unlock(&whep->video_queue_mutex);
     
-    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] 返回视频包: stream_index=%d, pts=%" PRId64 ", size=%d, keyframe=%d\n",
-           video_pkt->stream_index, video_pkt->pts, video_pkt->size, 
-           !!(video_pkt->flags & AV_PKT_FLAG_KEY));
+    if (!video_pkt) {
+        WHEP_LOG(s, AV_LOG_ERROR, "[WHEP] Got NULL packet from queue\n");
+        return AVERROR(EAGAIN);
+    }
     
-    av_packet_ref(pkt, video_pkt);
+    // Move packet data to output
+    av_packet_move_ref(pkt, video_pkt);
     av_packet_free(&video_pkt);
     
     // Verify stream index is valid
@@ -687,21 +587,15 @@ static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
         return AVERROR(EINVAL);
     }
     
-    WHEP_LOG(s, AV_LOG_INFO, "[WHEP] read_packet returning SUCCESS\n");
+    WHEP_LOG(s, AV_LOG_DEBUG, "[WHEP] Returning packet: stream=%d, pts=%" PRId64 ", size=%d, keyframe=%d\n",
+           pkt->stream_index, pkt->pts, pkt->size, !!(pkt->flags & AV_PKT_FLAG_KEY));
+    
     return 0;
 }
 
 static int whep_read_close(AVFormatContext *s)
 {
     WHEPContext *whep = s->priv_data;
-
-    // Stop RTP processing thread
-    if (whep->rtp_thread) {
-        atomic_store(&whep->thread_should_stop, 1);
-        pthread_cond_signal(&whep->video_queue_cond); // Wake up thread if waiting
-        pthread_join(whep->rtp_thread, NULL);
-        whep->rtp_thread = 0;
-    }
 
     if (whep->video_track > 0) {
         rtcDeleteTrack(whep->video_track);
@@ -741,21 +635,6 @@ static int whep_read_close(AVFormatContext *s)
     
     pthread_mutex_destroy(&whep->video_queue_mutex);
     pthread_cond_destroy(&whep->video_queue_cond);
-
-    if (whep->buffer) {
-        int head = atomic_load(&whep->head);
-        int tail = atomic_load(&whep->tail);
-
-        while (head != tail) {
-            Message *msg = whep->buffer[head];
-            if (msg) {
-                av_freep(&msg->data);
-                av_freep(&msg);
-            }
-            head = (head + 1) % whep->capacity;
-        }
-        av_freep(&whep->buffer);
-    }
 
     if (whep->video_pkt)
         av_packet_free(&whep->video_pkt);
