@@ -113,15 +113,6 @@ typedef struct WHEPContext {
     pthread_mutex_t pkt_fifo_lock;
     pthread_cond_t pkt_fifo_cond;
 
-    // Flow control state
-    int64_t last_remb_time;
-    int64_t dropped_packets;
-    int64_t total_packets;
-    int flow_control_enabled;
-    float flow_control_threshold;
-    int max_bitrate;
-    int min_bitrate;
-
     // Store AVFormatContext for callbacks
     AVFormatContext *avfmt_ctx;
 } WHEPContext;
@@ -261,61 +252,9 @@ typedef struct WHEPContext {
      if (rtp_ctx)
          ff_rtp_parse_close(rtp_ctx);
      av_free(dynamic_protocol_context);
-    return NULL;
-}
-
-// Send RTCP REMB (Receiver Estimated Maximum Bitrate) feedback
-static void send_remb_feedback(AVFormatContext *s, WHEPContext *whep, int track_id, uint32_t ssrc, uint32_t bitrate)
-{
-    // REMB format (RFC draft-alvestrand-rmcat-remb)
-    // 0                   1                   2                   3
-    // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |V=2|P| FMT=15  |   PT=206      |          length               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                  SSRC of packet sender                        |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |                  SSRC of media source                         |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |  Unique identifier 'R' 'E' 'M' 'B'                            |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |  Num SSRC     | BR Exp    |  BR Mantissa                      |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    // |   SSRC feedback                                               |
-    // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-    uint32_t sender_ssrc = ssrc + 1; // Use SSRC + 1 as sender
-    
-    // Calculate BR Exp and Mantissa (bitrate = mantissa * 2^exp)
-    uint8_t exp = 0;
-    uint32_t mantissa = bitrate;
-    while (mantissa > 0x3FFFF && exp < 63) { // 18-bit mantissa max
-        mantissa >>= 1;
-        exp++;
-    }
-    
-    uint8_t remb_packet[24] = {
-        (RTP_VERSION << 6) | 15,  // V=2, P=0, FMT=15 (Application layer FB)
-        206,                       // PT=206 (PSFB)
-        0x00, 0x05,               // Length = 5 (6 * 4 bytes - 4)
-        sender_ssrc >> 24, sender_ssrc >> 16, sender_ssrc >> 8, sender_ssrc,
-        0, 0, 0, 0,               // Media source SSRC (0 for now)
-        'R', 'E', 'M', 'B',       // Unique identifier
-        1,                        // Num SSRC = 1
-        (exp << 2) | ((mantissa >> 16) & 0x03),  // BR Exp (6 bits) + Mantissa high 2 bits
-        (mantissa >> 8) & 0xFF,   // Mantissa middle 8 bits
-        mantissa & 0xFF,          // Mantissa low 8 bits
-        ssrc >> 24, ssrc >> 16, ssrc >> 8, ssrc  // SSRC feedback
-    };
-    
-    if (rtcSendMessage(track_id, (const char *)remb_packet, sizeof(remb_packet)) < 0) {
-        av_log(s, AV_LOG_WARNING, "Failed to send REMB feedback (bitrate: %u bps)\n", bitrate);
-    } else {
-        av_log(s, AV_LOG_DEBUG, "Sent REMB feedback: %u bps (exp=%u, mantissa=%u)\n", 
-               bitrate, exp, mantissa);
-    }
-}
-
+     return NULL;
+ }
+ 
 static void message_callback(int id, const char *message, int size, void *ptr)
 {
     WHEPContext *whep = ptr;
@@ -455,100 +394,12 @@ static void message_callback(int id, const char *message, int size, void *ptr)
             AVPacket *pkt_copy = av_packet_alloc();
             if (pkt_copy && av_packet_ref(pkt_copy, pkt) == 0) {
                 pthread_mutex_lock(&whep->pkt_fifo_lock);
-                
-                size_t fifo_size = av_fifo_can_read(whep->pkt_fifo);
-                size_t fifo_capacity = av_fifo_can_write(whep->pkt_fifo) + fifo_size;
-                float usage_ratio = (float)fifo_size / fifo_capacity;
-                
-                whep->total_packets++;
-                
-                // Flow control: Check FIFO usage
                 if (av_fifo_can_write(whep->pkt_fifo) >= 1) {
                     av_fifo_write(whep->pkt_fifo, &pkt_copy, 1);
                     pthread_cond_signal(&whep->pkt_fifo_cond);
-                    
-                    // Adaptive flow control using REMB
-                    if (whep->flow_control_enabled && 
-                        usage_ratio > whep->flow_control_threshold && 
-                        rtp_ctx->ssrc && id == whep->video_track) {
-                        int64_t now = av_gettime_relative();
-                        // Send REMB at most once per second
-                        if (!whep->last_remb_time || (now - whep->last_remb_time) >= 1000000) {
-                            // Calculate target bitrate based on usage ratio
-                            // Linear mapping from threshold to 1.0 -> max_bitrate to min_bitrate
-                            float pressure = (usage_ratio - whep->flow_control_threshold) / 
-                                           (1.0f - whep->flow_control_threshold);
-                            pressure = pressure > 1.0f ? 1.0f : pressure;
-                            
-                            uint32_t target_bitrate = whep->max_bitrate - 
-                                (uint32_t)((whep->max_bitrate - whep->min_bitrate) * pressure);
-                            
-                            if (target_bitrate < whep->min_bitrate)
-                                target_bitrate = whep->min_bitrate;
-                            
-                            send_remb_feedback(s, whep, id, rtp_ctx->ssrc, target_bitrate);
-                            whep->last_remb_time = now;
-                            
-                            av_log(s, AV_LOG_DEBUG, 
-                                   "Flow control: FIFO %.1f%% full, requesting %u bps\n",
-                                   usage_ratio * 100.0f, target_bitrate);
-                        }
-                    }
                 } else {
-                    // FIFO is full - implement smart drop strategy
-                    int should_drop = 1;
-                    
-                    // Strategy 1: Keep keyframes (I-frames), drop others
-                    if (pkt_copy->flags & AV_PKT_FLAG_KEY) {
-                        should_drop = 0; // Never drop keyframes
-                        
-                        // If even keyframes can't fit, drop the oldest non-keyframe
-                        AVPacket *old_pkt = NULL;
-                        size_t read_pos = 0;
-                        while (read_pos < fifo_size) {
-                            AVPacket *test_pkt;
-                            if (av_fifo_peek(whep->pkt_fifo, &test_pkt, 1, read_pos) >= 0) {
-                                if (!(test_pkt->flags & AV_PKT_FLAG_KEY)) {
-                                    old_pkt = test_pkt;
-                                    break;
-                                }
-                            }
-                            read_pos++;
-                        }
-                        
-                        if (old_pkt) {
-                            // Remove the old non-keyframe (simplified: just read and discard oldest)
-                            AVPacket *discard_pkt = NULL;
-                            if (av_fifo_read(whep->pkt_fifo, &discard_pkt, 1) >= 0) {
-                                av_packet_free(&discard_pkt);
-                                av_log(s, AV_LOG_DEBUG, "Dropped old packet to make room for keyframe\n");
-                            }
-                            // Now write the keyframe
-                            av_fifo_write(whep->pkt_fifo, &pkt_copy, 1);
-                            pthread_cond_signal(&whep->pkt_fifo_cond);
-                            should_drop = 0;
-                        }
-                    }
-                    
-                    if (should_drop) {
-                        whep->dropped_packets++;
-                        float drop_rate = (float)whep->dropped_packets / whep->total_packets * 100.0f;
-                        
-                        av_log(s, AV_LOG_WARNING, 
-                               "FIFO full (%.1f%%), dropping packet (drop rate: %.2f%%, %lld/%lld)\n",
-                               usage_ratio * 100.0f, drop_rate, 
-                               (long long)whep->dropped_packets, (long long)whep->total_packets);
-                        av_packet_free(&pkt_copy);
-                        
-                        // Send aggressive REMB when dropping packets
-                        if (whep->flow_control_enabled && rtp_ctx->ssrc && id == whep->video_track) {
-                            int64_t now = av_gettime_relative();
-                            if (!whep->last_remb_time || (now - whep->last_remb_time) >= 500000) {
-                                send_remb_feedback(s, whep, id, rtp_ctx->ssrc, whep->min_bitrate);
-                                whep->last_remb_time = now;
-                            }
-                        }
-                    }
+                    av_log(s, AV_LOG_WARNING, "Packet FIFO is full, dropping packet\n");
+                    av_packet_free(&pkt_copy);
                 }
                 pthread_mutex_unlock(&whep->pkt_fifo_lock);
             } else {
@@ -758,21 +609,13 @@ static int whep_read_close(AVFormatContext *s)
 }
  
  #define OFFSET(x) offsetof(WHEPContext, x)
-static const AVOption whep_options[] = {
-    { "token", "set token to send in the Authorization header as \"Bearer <token>\"",
-        OFFSET(token), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
-    { "pli_period", "set interval in seconds for sending periodic PLI (Picture Loss Indication) requests; 0 to disable",
-        OFFSET(pli_period), AV_OPT_TYPE_INT, {.i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
-    { "flow_control", "enable adaptive flow control using RTCP REMB feedback",
-        OFFSET(flow_control_enabled), AV_OPT_TYPE_BOOL, {.i64 = 1 }, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
-    { "flow_control_threshold", "FIFO usage ratio (0.0-1.0) to trigger flow control",
-        OFFSET(flow_control_threshold), AV_OPT_TYPE_FLOAT, {.dbl = 0.75 }, 0.0, 1.0, AV_OPT_FLAG_DECODING_PARAM },
-    { "max_bitrate", "maximum bitrate in bps for flow control (0=unlimited)",
-        OFFSET(max_bitrate), AV_OPT_TYPE_INT, {.i64 = 5000000 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
-    { "min_bitrate", "minimum bitrate in bps for flow control",
-        OFFSET(min_bitrate), AV_OPT_TYPE_INT, {.i64 = 300000 }, 100000, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
-    { NULL }
-};
+ static const AVOption whep_options[] = {
+     { "token", "set token to send in the Authorization header as \"Bearer <token>\"",
+         OFFSET(token), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
+     { "pli_period", "set interval in seconds for sending periodic PLI (Picture Loss Indication) requests; 0 to disable",
+         OFFSET(pli_period), AV_OPT_TYPE_INT, {.i64 = 0 }, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+     { NULL }
+ };
  
  static const AVClass whep_class = {
      .class_name = "WHEP demuxer",
