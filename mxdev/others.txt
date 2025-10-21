@@ -60,3 +60,9 @@ sudo ./ffmpeg_g -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime  
 
 sudo ./ffmpeg_g -loglevel info -hwaccel rkmpp -hwaccel_output_format drm_prime -re -stream_loop -1 -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -r 30 -f mxcam -phone 2 -
 
+sudo ./ffmpeg_g -loglevel info \
+  -analyzeduration 5000000 -probesize 5000000 \
+  -f whep \
+  -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" \
+  -c:v copy -c:a copy \
+  -f null -

@@ -517,9 +517,6 @@ extern const FFOutputFormat ff_webp_muxer;
 extern const FFInputFormat  ff_webvtt_demuxer;
 extern const FFOutputFormat ff_webvtt_muxer;
 extern const FFInputFormat  ff_whep_demuxer;
-#if CONFIG_WHEP_GPT_DEMUXER
-extern const FFInputFormat  ff_whep_gpt_demuxer;
-#endif
 extern const FFInputFormat  ff_wsaud_demuxer;
 extern const FFOutputFormat ff_whip_muxer;
 extern const FFOutputFormat ff_wsaud_muxer;

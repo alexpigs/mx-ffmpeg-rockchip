@@ -1164,11 +1164,11 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
   }
   
   // 调试：收到超过2k个包时停止，方便分析
-  if (packet_count > 2000) {
-    av_log(s1, AV_LOG_ERROR, "[MXCam] 已收到 %d 个包，触发调试断言\n", packet_count);
-    assert(packet_count <= 2000 && "Debug: 超过2000个包，停止进程以便分析");
-    exit(-1);
-  }
+  // if (packet_count > 2000) {
+  //   av_log(s1, AV_LOG_ERROR, "[MXCam] 已收到 %d 个包，触发调试断言\n", packet_count);
+  //   assert(packet_count <= 2000 && "Debug: 超过2000个包，停止进程以便分析");
+  //   exit(-1);
+  // }
 
   // 将packet放到对应的list
   if (pkt->stream_index == mx->audio_stream_idx) {
