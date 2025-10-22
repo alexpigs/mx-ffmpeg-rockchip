@@ -570,6 +570,7 @@ static int whep_read_header(AVFormatContext *s)
     rtcConfiguration config = {0};
     int ret;
 
+    config.disableAutoNegotiation = true;
     ff_whip_whep_init_rtc_logger();
     s->ctx_flags |= AVFMTCTX_NOHEADER;
 
