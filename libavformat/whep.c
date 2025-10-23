@@ -121,6 +121,7 @@ typedef struct WHEPContext {
     float flow_control_threshold;
     int max_bitrate;
     int min_bitrate;
+    int waiting_for_keyframe;  // Flag to indicate we're dropping until next keyframe
 
     // Store AVFormatContext for callbacks
     AVFormatContext *avfmt_ctx;
@@ -210,7 +211,7 @@ typedef struct WHEPContext {
      if (st->codecpar->sample_rate > 0)
          st->time_base = (AVRational){1, st->codecpar->sample_rate};
  
-     rtp_ctx = ff_rtp_parse_open(s, st, payload_type, 1024);
+     rtp_ctx = ff_rtp_parse_open(s, st, payload_type, 256);
      if (!rtp_ctx) {
          av_log(s, AV_LOG_ERROR, "Failed to open RTP context\n");
          goto fail;
@@ -495,59 +496,53 @@ static void message_callback(int id, const char *message, int size, void *ptr)
                         }
                     }
                 } else {
-                    // FIFO is full - implement smart drop strategy
-                    int should_drop = 1;
-                    
-                    // Strategy 1: Keep keyframes (I-frames), drop others
-                    if (pkt_copy->flags & AV_PKT_FLAG_KEY) {
-                        should_drop = 0; // Never drop keyframes
+                    // FIFO is full - start dropping until next keyframe
+                    if (!whep->waiting_for_keyframe) {
+                        whep->waiting_for_keyframe = 1;
+                        av_log(s, AV_LOG_WARNING, 
+                               "FIFO full (%.1f%%), entering drop mode until next keyframe\n",
+                               usage_ratio * 100.0f);
                         
-                        // If even keyframes can't fit, drop the oldest non-keyframe
-                        AVPacket *old_pkt = NULL;
-                        size_t read_pos = 0;
-                        while (read_pos < fifo_size) {
-                            AVPacket *test_pkt;
-                            if (av_fifo_peek(whep->pkt_fifo, &test_pkt, 1, read_pos) >= 0) {
-                                if (!(test_pkt->flags & AV_PKT_FLAG_KEY)) {
-                                    old_pkt = test_pkt;
-                                    break;
-                                }
-                            }
-                            read_pos++;
-                        }
-                        
-                        if (old_pkt) {
-                            // Remove the old non-keyframe (simplified: just read and discard oldest)
-                            AVPacket *discard_pkt = NULL;
-                            if (av_fifo_read(whep->pkt_fifo, &discard_pkt, 1) >= 0) {
-                                av_packet_free(&discard_pkt);
-                                av_log(s, AV_LOG_DEBUG, "Dropped old packet to make room for keyframe\n");
-                            }
-                            // Now write the keyframe
-                            av_fifo_write(whep->pkt_fifo, &pkt_copy, 1);
-                            pthread_cond_signal(&whep->pkt_fifo_cond);
-                            should_drop = 0;
+                        // Send aggressive REMB when entering drop mode
+                        if (whep->flow_control_enabled && rtp_ctx->ssrc && id == whep->video_track) {
+                            send_remb_feedback(s, whep, id, rtp_ctx->ssrc, whep->min_bitrate);
+                            whep->last_remb_time = av_gettime_relative();
                         }
                     }
                     
-                    if (should_drop) {
-                        whep->dropped_packets++;
-                        float drop_rate = (float)whep->dropped_packets / whep->total_packets * 100.0f;
-                        
-                        av_log(s, AV_LOG_WARNING, 
-                               "FIFO full (%.1f%%), dropping packet (drop rate: %.2f%%, %lld/%lld)\n",
-                               usage_ratio * 100.0f, drop_rate, 
-                               (long long)whep->dropped_packets, (long long)whep->total_packets);
-                        av_packet_free(&pkt_copy);
-                        
-                        // Send aggressive REMB when dropping packets
-                        if (whep->flow_control_enabled && rtp_ctx->ssrc && id == whep->video_track) {
-                            int64_t now = av_gettime_relative();
-                            if (!whep->last_remb_time || (now - whep->last_remb_time) >= 500000) {
-                                send_remb_feedback(s, whep, id, rtp_ctx->ssrc, whep->min_bitrate);
-                                whep->last_remb_time = now;
+                    // Check if this is a keyframe
+                    if (pkt_copy->flags & AV_PKT_FLAG_KEY) {
+                        // This is a keyframe - try to make room for it
+                        // Drop oldest packets until we have space
+                        AVPacket *old_pkt = NULL;
+                        while (av_fifo_can_write(whep->pkt_fifo) == 0) {
+                            if (av_fifo_read(whep->pkt_fifo, &old_pkt, 1) >= 0) {
+                                av_packet_free(&old_pkt);
+                            } else {
+                                break;
                             }
                         }
+                        
+                        // Now write the keyframe
+                        if (av_fifo_write(whep->pkt_fifo, &pkt_copy, 1) >= 0) {
+                            pthread_cond_signal(&whep->pkt_fifo_cond);
+                            whep->waiting_for_keyframe = 0;  // Reset flag after keyframe
+                            av_log(s, AV_LOG_INFO, 
+                                   "Keyframe received, exiting drop mode (dropped %lld packets, %.2f%%)\n",
+                                   (long long)whep->dropped_packets,
+                                   (float)whep->dropped_packets / whep->total_packets * 100.0f);
+                        } else {
+                            av_log(s, AV_LOG_ERROR, "Failed to write keyframe to FIFO\n");
+                            av_packet_free(&pkt_copy);
+                        }
+                    } else {
+                        // Not a keyframe - drop it
+                        whep->dropped_packets++;
+                        av_log(s, AV_LOG_DEBUG, 
+                               "Dropping non-keyframe packet (drop rate: %.2f%%, %lld/%lld)\n",
+                               (float)whep->dropped_packets / whep->total_packets * 100.0f,
+                               (long long)whep->dropped_packets, (long long)whep->total_packets);
+                        av_packet_free(&pkt_copy);
                     }
                 }
                 pthread_mutex_unlock(&whep->pkt_fifo_lock);
@@ -576,6 +571,12 @@ static int whep_read_header(AVFormatContext *s)
 
     // Store AVFormatContext pointer for callback
     whep->avfmt_ctx = s;
+
+    // Initialize flow control state
+    whep->waiting_for_keyframe = 0;
+    whep->dropped_packets = 0;
+    whep->total_packets = 0;
+    whep->last_remb_time = 0;
 
     // Initialize packet FIFO (can store 100 AVPacket pointers)
     whep->pkt_fifo = av_fifo_alloc2(2048, sizeof(AVPacket *), 0);
