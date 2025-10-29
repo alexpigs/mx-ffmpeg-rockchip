@@ -28,6 +28,18 @@ static int write_header(AVFormatContext *s1) {
 
   ALOGD("MXCamEnc: write_header url=%s,phone=%d,pipe_path=%s\n", s1->url, mx->phone, mx->pipe_path);
 
+  // 低延迟实时流配置：
+  // 1. 禁用交错延迟检查 - 不等待 10 秒，有包就发
+  s1->max_interleave_delta = 0;
+  
+  // 2. 禁用输出缓冲 - 立即刷新到 mxcam
+  s1->flush_packets = 1;
+  
+  // 3. 设置最小缓冲 - 减少 FFmpeg 内部缓存
+  if (s1->pb) {
+    s1->pb->min_packet_size = 0;
+  }
+
   mx->audio_stream_idx = -1;
   mx->video_stream_idx = -1;
 
