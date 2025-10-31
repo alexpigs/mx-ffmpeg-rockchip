@@ -249,24 +249,16 @@ static int whep_init_peer_connection(AVFormatContext *avctx)
     rtcSetGatheringStateChangeCallback(whep->peer_connection, on_gathering_state_change);
     rtcSetUserPointer(whep->peer_connection, whep);
 
-    // === 添加音频 track (Opus) ===
-    rtcMediaDescription audio_media;
-    memset(&audio_media, 0, sizeof(audio_media));
-    audio_media.type = RTC_MEDIA_TYPE_AUDIO;
-    audio_media.mid = "0";
-    audio_media.direction = RTC_DIRECTION_RECVONLY;
+    // === 添加音频 track (Opus) - 使用 SDP 字符串 ===
+    const char *audio_sdp = 
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "a=mid:0\r\n"
+        "a=recvonly\r\n"
+        "a=rtcp-mux\r\n"
+        "a=rtpmap:111 opus/48000/2\r\n"
+        "a=fmtp:111 minptime=10;useinbandfec=1\r\n";
 
-    // Opus codec
-    rtcCodec opus_codec = {
-        .payloadType = 111,
-        .mimeType = "opus/48000/2",
-        .parameters = "minptime=10;useinbandfec=1"
-    };
-    
-    audio_media.codecs = &opus_codec;
-    audio_media.codecsCount = 1;
-
-    audio_track = rtcAddTrack(whep->peer_connection, &audio_media);
+    audio_track = rtcAddTrack(whep->peer_connection, audio_sdp);
     if (audio_track < 0) {
         av_log(avctx, AV_LOG_ERROR, "添加音频 track 失败: %d\n", audio_track);
         ret = AVERROR_EXTERNAL;
@@ -274,41 +266,22 @@ static int whep_init_peer_connection(AVFormatContext *avctx)
     }
     av_log(avctx, AV_LOG_INFO, "音频 track 添加成功 (ID: %d)\n", audio_track);
 
-    // === 添加视频 track (H264) ===
-    rtcMediaDescription video_media;
-    memset(&video_media, 0, sizeof(video_media));
-    video_media.type = RTC_MEDIA_TYPE_VIDEO;
-    video_media.mid = "1";
-    video_media.direction = RTC_DIRECTION_RECVONLY;
+    // === 添加视频 track (H264) - 使用 SDP 字符串 ===
+    const char *video_sdp = 
+        "m=video 9 UDP/TLS/RTP/SAVPF 103 107 109 115\r\n"
+        "a=mid:1\r\n"
+        "a=recvonly\r\n"
+        "a=rtcp-mux\r\n"
+        "a=rtpmap:103 H264/90000\r\n"
+        "a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n"
+        "a=rtpmap:107 H264/90000\r\n"
+        "a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n"
+        "a=rtpmap:109 H264/90000\r\n"
+        "a=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
+        "a=rtpmap:115 H264/90000\r\n"
+        "a=fmtp:115 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f\r\n";
 
-    // H264 codecs (支持多个 profile)
-    rtcCodec h264_codecs[] = {
-        {
-            .payloadType = 103,
-            .mimeType = "H264/90000",
-            .parameters = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
-        },
-        {
-            .payloadType = 107,
-            .mimeType = "H264/90000",
-            .parameters = "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f"
-        },
-        {
-            .payloadType = 109,
-            .mimeType = "H264/90000",
-            .parameters = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-        },
-        {
-            .payloadType = 115,
-            .mimeType = "H264/90000",
-            .parameters = "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"
-        }
-    };
-
-    video_media.codecs = h264_codecs;
-    video_media.codecsCount = 4;
-
-    video_track = rtcAddTrack(whep->peer_connection, &video_media);
+    video_track = rtcAddTrack(whep->peer_connection, video_sdp);
     if (video_track < 0) {
         av_log(avctx, AV_LOG_ERROR, "添加视频 track 失败: %d\n", video_track);
         ret = AVERROR_EXTERNAL;

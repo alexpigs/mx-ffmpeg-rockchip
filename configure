@@ -7054,7 +7054,24 @@ enabled libcelt           && require libcelt celt/celt.h celt_decode -lcelt0 &&
                                die "ERROR: libcelt must be installed and version must be >= 0.11.0."; }
 enabled libcaca           && require_pkg_config libcaca caca caca.h caca_create_canvas
 enabled libcodec2         && require libcodec2 codec2/codec2.h codec2_create -lcodec2
-enabled libdatachannel    && require libdatachannel rtc/rtc.h rtcCreatePeerConnection -ldatachannel
+enabled libdatachannel    && {
+    # 只使用 deps 目录下的 libdatachannel
+    test -f "$source_path/deps/install/lib/libdatachannel.a" ||
+        die "ERROR: libdatachannel not found. Please run: cd deps && ./build_libdatachannel.sh"
+    
+    # 检查头文件是否存在（直接文件检查）
+    test -f "$source_path/deps/install/include/rtc/rtc.h" ||
+        die "ERROR: rtc/rtc.h not found in deps/install/include/rtc/"
+    
+    # 添加编译和链接参数
+    add_cflags "-I$source_path/deps/install/include"
+    # 动态库链接（不需要 --start-group/--end-group）
+    add_ldflags "-L$source_path/deps/install/lib"
+    add_extralibs "-ldatachannel"
+    add_extralibs "-lssl -lcrypto -lpthread"
+    # 添加运行时库搜索路径
+    add_ldflags "-Wl,-rpath,$source_path/deps/install/lib"
+}
 enabled libdav1d          && require_pkg_config libdav1d "dav1d >= 0.5.0" "dav1d/dav1d.h" dav1d_version
 enabled libdavs2          && require_pkg_config libdavs2 "davs2 >= 1.6.0" davs2.h davs2_decoder_open
 enabled libdc1394         && require_pkg_config libdc1394 libdc1394-2 dc1394/dc1394.h dc1394_new

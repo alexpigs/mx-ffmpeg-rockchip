@@ -1,6 +1,6 @@
 
 debug
-./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo  --enable-openssl --enable-libdatachannel  --disable-xv --disable-xlib --disable-outdev=xv  
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo  --enable-openssl --enable-libdatachannel 
 
 releae
 ./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-muxer=fifo --disable-sdl2   --enable-openssl --enable-libdatachannel
