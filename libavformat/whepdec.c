@@ -39,6 +39,7 @@
 #include "http.h"
 #include "avio_internal.h"
 #include "whip_whep.h"
+#include "rtpdec.h"
 
 typedef struct WHEPContext {
     AVClass *class;
@@ -68,8 +69,207 @@ typedef struct WHEPContext {
     int audio_track;             ///< 音频 track ID
     int video_track;             ///< 视频 track ID
     char *resource_url;          ///< WHEP 资源 URL (用于DELETE)
+    
+    // RTP demuxer 数组，按 Payload Type 索引 (0-127)
+    // 一个 track 可能有多个 PT (例如主流+RTX)
+    RTPDemuxContext *rtp_demux[128];
 } WHEPContext;
 
+
+/**
+ * 解析 SDP answer，动态创建对应的流，并初始化 RTPDemuxContext
+ * @param avctx AVFormatContext
+ * @param whep WHEP 上下文
+ * @param sdp_answer SDP answer 字符串
+ * @return 0表示成功，负值表示错误
+ */
+static int whep_parse_sdp_and_init_rtp(AVFormatContext *avctx, WHEPContext *whep, const char *sdp_answer)
+{
+    const char *line = sdp_answer;
+    const char *next_line;
+    int pt, clock_rate, channels;
+    char codec_name[64];
+    AVStream *st = NULL;
+    AVStream *video_stream = NULL;  // 视频流指针
+    AVStream *audio_stream = NULL;  // 音频流指针
+    enum AVMediaType media_type = AVMEDIA_TYPE_UNKNOWN;
+    
+    av_log(avctx, AV_LOG_INFO, "开始解析 SDP answer，动态创建流并初始化 RTP demuxer...\n");
+    
+    // 初始化数组
+    memset(whep->rtp_demux, 0, sizeof(whep->rtp_demux));
+    
+    // 逐行解析 SDP
+    while (line && *line) {
+        // 查找下一行
+        next_line = strchr(line, '\n');
+        int line_len = next_line ? (next_line - line) : strlen(line);
+        
+        // 跳过 \r
+        if (line_len > 0 && line[line_len - 1] == '\r')
+            line_len--;
+        
+        // 解析 m= 行以确定媒体类型，并动态创建对应的流
+        if (line_len > 2 && line[0] == 'm' && line[1] == '=') {
+            if (av_strstart(line, "m=audio", NULL)) {
+                media_type = AVMEDIA_TYPE_AUDIO;
+                
+                // 如果音频流还未创建，则创建它
+                if (!audio_stream) {
+                    audio_stream = avformat_new_stream(avctx, NULL);
+                    if (!audio_stream) {
+                        av_log(avctx, AV_LOG_ERROR, "创建音频流失败\n");
+                        return AVERROR(ENOMEM);
+                    }
+                    audio_stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+                    avpriv_set_pts_info(audio_stream, 64, 1, 1000000);
+                    av_log(avctx, AV_LOG_INFO, "创建音频流 (index=%d)\n", audio_stream->index);
+                }
+                st = audio_stream;
+                
+            } else if (av_strstart(line, "m=video", NULL)) {
+                media_type = AVMEDIA_TYPE_VIDEO;
+                
+                // 如果视频流还未创建，则创建它
+                if (!video_stream) {
+                    video_stream = avformat_new_stream(avctx, NULL);
+                    if (!video_stream) {
+                        av_log(avctx, AV_LOG_ERROR, "创建视频流失败\n");
+                        return AVERROR(ENOMEM);
+                    }
+                    video_stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+                    avpriv_set_pts_info(video_stream, 64, 1, 1000000);
+                    av_log(avctx, AV_LOG_INFO, "创建视频流 (index=%d)\n", video_stream->index);
+                }
+                st = video_stream;
+            }
+        }
+        
+        // 解析 a=rtpmap: 行
+        // 格式: a=rtpmap:<payload type> <encoding name>/<clock rate>[/<channels>]
+        if (line_len > 9 && av_strstart(line, "a=rtpmap:", NULL)) {
+            const char *p = line + 9;
+            
+            // 解析 payload type
+            pt = atoi(p);
+            
+            // 跳过数字到空格
+            while (*p && *p != ' ')
+                p++;
+            while (*p == ' ')
+                p++;
+            
+            // 解析 codec name
+            int i = 0;
+            while (*p && *p != '/' && i < sizeof(codec_name) - 1) {
+                codec_name[i++] = *p++;
+            }
+            codec_name[i] = '\0';
+            
+            // 解析 clock rate
+            if (*p == '/') {
+                p++;
+                clock_rate = atoi(p);
+                
+                // 解析 channels (音频)
+                while (*p && *p != '/')
+                    p++;
+                if (*p == '/') {
+                    p++;
+                    channels = atoi(p);
+                } else {
+                    channels = (media_type == AVMEDIA_TYPE_AUDIO) ? 2 : 0;
+                }
+            } else {
+                clock_rate = 90000;  // 视频默认
+                channels = 0;
+            }
+            
+            av_log(avctx, AV_LOG_INFO, "解析 rtpmap: PT=%d, codec=%s, clock_rate=%d, channels=%d, media_type=%d\n",
+                   pt, codec_name, clock_rate, channels, media_type);
+            
+            // 只为主流 codec 创建 RTPDemuxContext (跳过 rtx/red 等辅助流)
+            if (st && media_type != AVMEDIA_TYPE_UNKNOWN &&
+                av_strcasecmp(codec_name, "rtx") != 0 &&
+                av_strcasecmp(codec_name, "red") != 0 &&
+                av_strcasecmp(codec_name, "ulpfec") != 0) {
+                
+                // 映射 codec name 到 AVCodecID
+                enum AVCodecID codec_id = AV_CODEC_ID_NONE;
+                if (av_strcasecmp(codec_name, "H264") == 0) {
+                    codec_id = AV_CODEC_ID_H264;
+                } else if (av_strcasecmp(codec_name, "H265") == 0 || av_strcasecmp(codec_name, "HEVC") == 0) {
+                    codec_id = AV_CODEC_ID_HEVC;
+                } else if (av_strcasecmp(codec_name, "VP8") == 0) {
+                    codec_id = AV_CODEC_ID_VP8;
+                } else if (av_strcasecmp(codec_name, "VP9") == 0) {
+                    codec_id = AV_CODEC_ID_VP9;
+                } else if (av_strcasecmp(codec_name, "AV1") == 0) {
+                    codec_id = AV_CODEC_ID_AV1;
+                } else if (av_strcasecmp(codec_name, "opus") == 0) {
+                    codec_id = AV_CODEC_ID_OPUS;
+                } else if (av_strcasecmp(codec_name, "PCMU") == 0) {
+                    codec_id = AV_CODEC_ID_PCM_MULAW;
+                } else if (av_strcasecmp(codec_name, "PCMA") == 0) {
+                    codec_id = AV_CODEC_ID_PCM_ALAW;
+                } else if (av_strcasecmp(codec_name, "G722") == 0) {
+                    codec_id = AV_CODEC_ID_ADPCM_G722;
+                } else {
+                    av_log(avctx, AV_LOG_WARNING, "未识别的 codec: %s, 跳过\n", codec_name);
+                }
+                
+                if (codec_id != AV_CODEC_ID_NONE) {
+                    // 更新 AVStream 的 codec_id
+                    st->codecpar->codec_id = codec_id;
+                    
+                    // 更新采样率/时钟频率
+                    if (media_type == AVMEDIA_TYPE_AUDIO) {
+                        st->codecpar->sample_rate = clock_rate;
+                        st->codecpar->ch_layout.nb_channels = channels;
+                    }
+                    
+                    av_log(avctx, AV_LOG_INFO, "设置流参数: index=%d, codec_id=%d (%s), clock_rate=%d\n", 
+                           st->index, codec_id, codec_name, clock_rate);
+                    
+                    // 创建 RTPDemuxContext
+                    whep->rtp_demux[pt] = ff_rtp_parse_open(avctx, st, pt, RTP_REORDER_QUEUE_DEFAULT_SIZE);
+                    if (!whep->rtp_demux[pt]) {
+                        av_log(avctx, AV_LOG_ERROR, "创建 RTPDemuxContext 失败 (PT=%d)\n", pt);
+                        return AVERROR(ENOMEM);
+                    }
+                    
+                    av_log(avctx, AV_LOG_INFO, "成功创建 RTPDemuxContext: PT=%d → stream[%d]\n", pt, st->index);
+                }
+            }
+        }
+        
+        // 移动到下一行
+        if (next_line) {
+            line = next_line + 1;
+        } else {
+            break;
+        }
+    }
+    
+    // 总结创建的流
+    av_log(avctx, AV_LOG_INFO, "SDP 解析完成，共创建 %d 个流:\n", avctx->nb_streams);
+    if (video_stream) {
+        av_log(avctx, AV_LOG_INFO, "  - 视频流: index=%d, codec_id=%d\n", 
+               video_stream->index, video_stream->codecpar->codec_id);
+    }
+    if (audio_stream) {
+        av_log(avctx, AV_LOG_INFO, "  - 音频流: index=%d, codec_id=%d, sample_rate=%d\n", 
+               audio_stream->index, audio_stream->codecpar->codec_id,
+               audio_stream->codecpar->sample_rate);
+    }
+    
+    if (!video_stream && !audio_stream) {
+        av_log(avctx, AV_LOG_ERROR, "SDP 中未找到任何可用的媒体流\n");
+        return AVERROR_INVALIDDATA;
+    }
+    
+    return 0;
+}
 
 /**
  * libdatachannel 状态改变回调
@@ -104,8 +304,34 @@ static void on_track_open(int tr, void *user_ptr)
  */
 static void on_audio_message(int tr, const char *data, int size, void *user_ptr)
 {
-    av_log(NULL, AV_LOG_INFO, "收到音频数据: Track ID=%d, 大小=%d bytes\n", tr, size);
-    // TODO: 将数据解析并放入队列
+    WHEPContext *whep = (WHEPContext *)user_ptr;
+    
+    // 验证是否是我们的音频 track
+    if (tr != whep->audio_track) {
+        av_log(NULL, AV_LOG_WARNING, "收到未知 track 的音频数据: %d (expected %d)\n", tr, whep->audio_track);
+        return;
+    }
+    
+    // RTP头部至少12字节
+    if (size < 12) {
+        av_log(NULL, AV_LOG_WARNING, "收到的RTP包太小: %d bytes\n", size);
+        return;
+    }
+    
+    // 解析 RTP 头部获取 Payload Type
+    uint8_t payload_type = (uint8_t)data[1] & 0x7F;
+    
+    // 查找对应的 RTPDemuxContext
+    RTPDemuxContext *rtp_demux = whep->rtp_demux[payload_type];
+    if (!rtp_demux) {
+        av_log(NULL, AV_LOG_WARNING, "未找到 PT=%u 的 RTP demuxer\n", payload_type);
+        return;
+    }
+    
+    av_log(NULL, AV_LOG_DEBUG, "收到音频 RTP: track=%d, PT=%u, size=%d bytes\n", tr, payload_type, size);
+    
+    // TODO: 调用 ff_rtp_parse_packet 解析并放入队列
+    // ff_rtp_parse_packet(rtp_demux, pkt, (const uint8_t *)data, size);
 }
 
 /**
@@ -113,8 +339,34 @@ static void on_audio_message(int tr, const char *data, int size, void *user_ptr)
  */
 static void on_video_message(int tr, const char *data, int size, void *user_ptr)
 {
-    av_log(NULL, AV_LOG_INFO, "收到视频数据: Track ID=%d, 大小=%d bytes\n", tr, size);
-    // TODO: 将数据解析并放入队列
+    WHEPContext *whep = (WHEPContext *)user_ptr;
+    
+    // 验证是否是我们的视频 track
+    if (tr != whep->video_track) {
+        av_log(NULL, AV_LOG_WARNING, "收到未知 track 的视频数据: %d (expected %d)\n", tr, whep->video_track);
+        return;
+    }
+    
+    // RTP头部至少12字节
+    if (size < 12) {
+        av_log(NULL, AV_LOG_WARNING, "收到的RTP包太小: %d bytes\n", size);
+        return;
+    }
+    
+    // 解析 RTP 头部获取 Payload Type
+    uint8_t payload_type = (uint8_t)data[1] & 0x7F;
+    
+    // 查找对应的 RTPDemuxContext
+    RTPDemuxContext *rtp_demux = whep->rtp_demux[payload_type];
+    if (!rtp_demux) {
+        av_log(NULL, AV_LOG_WARNING, "未找到 PT=%u 的 RTP demuxer\n", payload_type);
+        return;
+    }
+    
+    av_log(NULL, AV_LOG_DEBUG, "收到视频 RTP: track=%d, PT=%u, size=%d bytes\n", tr, payload_type, size);
+    
+    // TODO: 调用 ff_rtp_parse_packet 解析并放入队列
+    // ff_rtp_parse_packet(rtp_demux, pkt, (const uint8_t *)data, size);
 }
 
 
@@ -281,7 +533,6 @@ static av_unused int whep_queue_packet(WHEPContext *whep, AVPacket *pkt, int is_
 static av_cold int whep_read_header(AVFormatContext *avctx)
 {
     WHEPContext *whep = avctx->priv_data;
-    AVStream *st;
     int ret = 0;
 
     av_log(avctx, AV_LOG_INFO, "WHEP demuxer initializing...\n");
@@ -350,27 +601,21 @@ static av_cold int whep_read_header(AVFormatContext *avctx)
 
     av_log(avctx, AV_LOG_INFO, "WHEP 信令交互完成，等待 WebRTC 连接建立...\n");
 
-    // 创建视频流（占位）
-    st = avformat_new_stream(avctx, NULL);
-    if (!st) {
-        ret = AVERROR(ENOMEM);
-        goto fail;
+    // 3. 获取 remote description (SDP answer)，解析并动态创建流，初始化 RTP demuxer
+    char sdp_answer[8192];
+    int sdp_len = rtcGetRemoteDescription(whep->peer_connection, sdp_answer, sizeof(sdp_answer));
+    if (sdp_len > 0) {
+        sdp_answer[sdp_len] = '\0';
+        av_log(avctx, AV_LOG_DEBUG, "获取到 SDP answer (%d bytes)\n", sdp_len);
+        
+        ret = whep_parse_sdp_and_init_rtp(avctx, whep, sdp_answer);
+        if (ret < 0) {
+            av_log(avctx, AV_LOG_ERROR, "解析 SDP 并初始化 RTP demuxer 失败\n");
+            goto fail;
+        }
+    } else {
+        av_log(avctx, AV_LOG_WARNING, "无法获取 remote description\n");
     }
-    
-    st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-    st->codecpar->codec_id = AV_CODEC_ID_H264;  // 默认，后续会根据实际情况更新
-    avpriv_set_pts_info(st, 64, 1, 1000000);    // 使用微秒作为时间基
-
-    // 创建音频流（占位）
-    st = avformat_new_stream(avctx, NULL);
-    if (!st) {
-        ret = AVERROR(ENOMEM);
-        goto fail;
-    }
-    
-    st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->codec_id = AV_CODEC_ID_OPUS;  // 默认，后续会根据实际情况更新
-    avpriv_set_pts_info(st, 64, 1, 1000000);
 
     whep->initialized = 1;
     whep->start_time = av_gettime_relative();
@@ -461,6 +706,14 @@ static av_cold int whep_read_close(AVFormatContext *avctx)
     pthread_cond_broadcast(&whep->cond);
     pthread_mutex_unlock(&whep->mutex);
 
+    // 清理所有 RTP demuxer
+    for (int i = 0; i < 128; i++) {
+        if (whep->rtp_demux[i]) {
+            ff_rtp_parse_close(whep->rtp_demux[i]);
+            whep->rtp_demux[i] = NULL;
+        }
+    }
+    
     // 使用共享函数删除 WHEP 会话
     if (whep->resource_url) {
         av_log(avctx, AV_LOG_INFO, "删除 WHEP 会话...\n");

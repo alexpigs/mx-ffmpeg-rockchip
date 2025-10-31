@@ -7055,21 +7055,19 @@ enabled libcelt           && require libcelt celt/celt.h celt_decode -lcelt0 &&
 enabled libcaca           && require_pkg_config libcaca caca caca.h caca_create_canvas
 enabled libcodec2         && require libcodec2 codec2/codec2.h codec2_create -lcodec2
 enabled libdatachannel    && {
-    # 只使用 deps 目录下的 libdatachannel
-    test -f "$source_path/deps/install/lib/libdatachannel.a" ||
-        die "ERROR: libdatachannel not found. Please run: cd deps && ./build_libdatachannel.sh"
+    # 只使用 deps 目录下的 libdatachannel（动态库）
+    test -f "$source_path/deps/install/lib/libdatachannel.so" ||
+        die "ERROR: libdatachannel.so not found. Please run: cd deps && ./build_libdatachannel.sh"
     
-    # 检查头文件是否存在（直接文件检查）
+    # 检查头文件是否存在
     test -f "$source_path/deps/install/include/rtc/rtc.h" ||
         die "ERROR: rtc/rtc.h not found in deps/install/include/rtc/"
     
     # 添加编译和链接参数
     add_cflags "-I$source_path/deps/install/include"
-    # 动态库链接（不需要 --start-group/--end-group）
     add_ldflags "-L$source_path/deps/install/lib"
     add_extralibs "-ldatachannel"
-    add_extralibs "-lssl -lcrypto -lpthread"
-    # 添加运行时库搜索路径
+    # 添加运行时库搜索路径（动态库必需）
     add_ldflags "-Wl,-rpath,$source_path/deps/install/lib"
 }
 enabled libdav1d          && require_pkg_config libdav1d "dav1d >= 0.5.0" "dav1d/dav1d.h" dav1d_version
