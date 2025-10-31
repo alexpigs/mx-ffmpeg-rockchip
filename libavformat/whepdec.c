@@ -38,10 +38,12 @@
 #include "url.h"
 #include "http.h"
 #include "avio_internal.h"
+#include "whip_whep.h"
 
 typedef struct WHEPContext {
     AVClass *class;
     char *whep_url;              ///< WHEP server URL
+    char *token;                 ///< Bearer token for authentication
     int timeout;                 ///< Connection timeout in milliseconds
     int buffer_size;             ///< Buffer size for incoming packets
     int max_retry;               ///< Maximum number of reconnection attempts
@@ -63,24 +65,11 @@ typedef struct WHEPContext {
     
     // WebRTC 相关
     int peer_connection;         ///< libdatachannel PeerConnection ID
-    char *local_sdp;             ///< 本地 SDP offer
-    char *remote_sdp;            ///< 远端 SDP answer
+    int audio_track;             ///< 音频 track ID
+    int video_track;             ///< 视频 track ID
     char *resource_url;          ///< WHEP 资源 URL (用于DELETE)
 } WHEPContext;
 
-/**
- * libdatachannel 本地描述回调
- */
-static void on_local_description(int pc, const char *sdp, const char *type, void *user_ptr)
-{
-    WHEPContext *whep = (WHEPContext *)user_ptr;
-    
-    av_log(NULL, AV_LOG_INFO, "本地 SDP %s 生成:\n%s\n", type, sdp);
-    
-    // 保存本地 SDP
-    av_freep(&whep->local_sdp);
-    whep->local_sdp = av_strdup(sdp);
-}
 
 /**
  * libdatachannel 状态改变回调
@@ -103,125 +92,45 @@ static void on_gathering_state_change(int pc, rtcGatheringState state, void *use
 }
 
 /**
- * 通过 HTTP POST 发送 SDP offer 到 WHEP 服务器
- * @return 0表示成功，负值表示错误
+ * Track 打开回调
  */
-static int whep_exchange_sdp(AVFormatContext *avctx)
+static void on_track_open(int tr, void *user_ptr)
 {
-    WHEPContext *whep = avctx->priv_data;
-    AVIOContext *avio_ctx = NULL;
-    AVDictionary *options = NULL;
-    AVBPrint response;
-    char *headers = NULL;
-    uint8_t buf[4096];
-    int ret = 0;
-    int read_size;
-
-    if (!whep->local_sdp) {
-        av_log(avctx, AV_LOG_ERROR, "本地 SDP 未生成\n");
-        return AVERROR(EINVAL);
-    }
-
-    av_log(avctx, AV_LOG_INFO, "发送 WHEP POST 请求到: %s\n", whep->whep_url);
-
-    // 构建 HTTP headers
-    headers = av_asprintf(
-        "Content-Type: application/sdp\r\n"
-        "Content-Length: %zu\r\n",
-        strlen(whep->local_sdp)
-    );
-    if (!headers)
-        return AVERROR(ENOMEM);
-
-    av_dict_set(&options, "method", "POST", 0);
-    av_dict_set(&options, "headers", headers, 0);
-    av_dict_set_int(&options, "timeout", whep->timeout * 1000, 0);
-
-    // 打开 HTTP 连接
-    ret = avio_open2(&avio_ctx, whep->whep_url, AVIO_FLAG_READ_WRITE, 
-                     &avctx->interrupt_callback, &options);
-    if (ret < 0) {
-        av_log(avctx, AV_LOG_ERROR, "无法连接到 WHEP 服务器: %s\n", av_err2str(ret));
-        goto cleanup;
-    }
-
-    // 发送 SDP offer
-    avio_write(avio_ctx, (const unsigned char *)whep->local_sdp, strlen(whep->local_sdp));
-    avio_flush(avio_ctx);
-
-    av_log(avctx, AV_LOG_INFO, "SDP offer 已发送，等待服务器响应...\n");
-
-    // 读取响应
-    av_bprint_init(&response, 0, AV_BPRINT_SIZE_UNLIMITED);
-    while ((read_size = avio_read(avio_ctx, buf, sizeof(buf))) > 0) {
-        av_bprint_append_data(&response, (const char *)buf, read_size);
-    }
-
-    if (!av_bprint_is_complete(&response)) {
-        av_log(avctx, AV_LOG_ERROR, "响应数据过大\n");
-        ret = AVERROR(ENOMEM);
-        av_bprint_finalize(&response, NULL);
-        goto cleanup;
-    }
-
-    // 检查 HTTP 状态码
-    int http_code = 0;
-    if (avio_ctx->av_class) {
-        AVIOContext *h = avio_ctx;
-        av_opt_get_int(h, "http_code", AV_OPT_SEARCH_CHILDREN, (int64_t *)&http_code);
-    }
-
-    if (http_code != 200 && http_code != 201) {
-        av_log(avctx, AV_LOG_ERROR, "WHEP 服务器返回错误: HTTP %d\n", http_code);
-        ret = AVERROR_HTTP_BAD_REQUEST;
-        av_bprint_finalize(&response, NULL);
-        goto cleanup;
-    }
-
-    // 获取 Location 头（WHEP 资源 URL）
-    char *location = NULL;
-    if (avio_ctx->av_class) {
-        av_opt_get(avio_ctx, "location", AV_OPT_SEARCH_CHILDREN, (uint8_t **)&location);
-        if (location) {
-            whep->resource_url = av_strdup(location);
-            av_log(avctx, AV_LOG_INFO, "WHEP 资源 URL: %s\n", whep->resource_url);
-            av_free(location);
-        }
-    }
-
-    // 保存 SDP answer
-    av_bprint_finalize(&response, &whep->remote_sdp);
-    if (whep->remote_sdp && strlen(whep->remote_sdp) > 0) {
-        av_log(avctx, AV_LOG_INFO, "收到 SDP answer:\n%s\n", whep->remote_sdp);
-        ret = 0;
-    } else {
-        av_log(avctx, AV_LOG_ERROR, "服务器返回空的 SDP answer\n");
-        ret = AVERROR_INVALIDDATA;
-    }
-
-cleanup:
-    if (avio_ctx)
-        avio_close(avio_ctx);
-    av_dict_free(&options);
-    av_freep(&headers);
-    return ret;
+    av_log(NULL, AV_LOG_INFO, "Track 已打开 (ID: %d)\n", tr);
 }
 
 /**
- * 初始化 libdatachannel PeerConnection 并生成 offer
+ * 音频 Track 消息回调 - 接收 RTP 数据
+ */
+static void on_audio_message(int tr, const char *data, int size, void *user_ptr)
+{
+    av_log(NULL, AV_LOG_INFO, "收到音频数据: Track ID=%d, 大小=%d bytes\n", tr, size);
+    // TODO: 将数据解析并放入队列
+}
+
+/**
+ * 视频 Track 消息回调 - 接收 RTP 数据
+ */
+static void on_video_message(int tr, const char *data, int size, void *user_ptr)
+{
+    av_log(NULL, AV_LOG_INFO, "收到视频数据: Track ID=%d, 大小=%d bytes\n", tr, size);
+    // TODO: 将数据解析并放入队列
+}
+
+
+/**
+ * 初始化 libdatachannel PeerConnection 并添加 tracks
  */
 static int whep_init_peer_connection(AVFormatContext *avctx)
 {
     WHEPContext *whep = avctx->priv_data;
     rtcConfiguration config;
-    int audio_track = -1;
-    int video_track = -1;
     int ret;
 
     av_log(avctx, AV_LOG_INFO, "初始化 libdatachannel...\n");
 
-    // 初始化 libdatachannel 日志
-    rtcInitLogger(RTC_LOG_INFO, NULL);
+    // 使用共享的 RTC logger 初始化函数
+    ff_whip_whep_init_rtc_logger();
 
     // 配置 PeerConnection
     memset(&config, 0, sizeof(config));
@@ -244,68 +153,71 @@ static int whep_init_peer_connection(AVFormatContext *avctx)
     av_log(avctx, AV_LOG_INFO, "PeerConnection 创建成功 (ID: %d)\n", whep->peer_connection);
 
     // 设置回调
-    rtcSetLocalDescriptionCallback(whep->peer_connection, on_local_description);
     rtcSetStateChangeCallback(whep->peer_connection, on_state_change);
     rtcSetGatheringStateChangeCallback(whep->peer_connection, on_gathering_state_change);
     rtcSetUserPointer(whep->peer_connection, whep);
 
-    // === 添加音频 track (Opus) - 使用 SDP 字符串 ===
+    // === 添加音频 track (Opus) - 使用 SRS 兼容的 SDP 字符串 ===
+    // SRS 服务器期望标准的 SDP 格式，包含必要的属性
     const char *audio_sdp = 
         "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+        "c=IN IP4 0.0.0.0\r\n"
         "a=mid:0\r\n"
         "a=recvonly\r\n"
         "a=rtcp-mux\r\n"
+        "a=rtcp-rsize\r\n"
         "a=rtpmap:111 opus/48000/2\r\n"
         "a=fmtp:111 minptime=10;useinbandfec=1\r\n";
 
-    audio_track = rtcAddTrack(whep->peer_connection, audio_sdp);
-    if (audio_track < 0) {
-        av_log(avctx, AV_LOG_ERROR, "添加音频 track 失败: %d\n", audio_track);
+    whep->audio_track = rtcAddTrack(whep->peer_connection, audio_sdp);
+    if (whep->audio_track < 0) {
+        av_log(avctx, AV_LOG_ERROR, "添加音频 track 失败: %d\n", whep->audio_track);
         ret = AVERROR_EXTERNAL;
         goto fail;
     }
-    av_log(avctx, AV_LOG_INFO, "音频 track 添加成功 (ID: %d)\n", audio_track);
+    av_log(avctx, AV_LOG_INFO, "音频 track 添加成功 (ID: %d)\n", whep->audio_track);
 
-    // === 添加视频 track (H264) - 使用 SDP 字符串 ===
+    // 设置音频 track 回调
+    rtcSetOpenCallback(whep->audio_track, on_track_open);
+    rtcSetMessageCallback(whep->audio_track, on_audio_message);
+    rtcSetUserPointer(whep->audio_track, whep);
+
+    // === 添加视频 track (H264) - 使用 SRS 兼容的 SDP 字符串 ===
+    // SRS 通常使用 H.264 Baseline/Constrained Baseline Profile
+    // profile-level-id=42e01f 表示 Baseline Level 3.1
     const char *video_sdp = 
-        "m=video 9 UDP/TLS/RTP/SAVPF 103 107 109 115\r\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 96 97 98\r\n"
+        "c=IN IP4 0.0.0.0\r\n"
         "a=mid:1\r\n"
         "a=recvonly\r\n"
         "a=rtcp-mux\r\n"
-        "a=rtpmap:103 H264/90000\r\n"
-        "a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n"
-        "a=rtpmap:107 H264/90000\r\n"
-        "a=fmtp:107 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n"
-        "a=rtpmap:109 H264/90000\r\n"
-        "a=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
-        "a=rtpmap:115 H264/90000\r\n"
-        "a=fmtp:115 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f\r\n";
+        "a=rtcp-rsize\r\n"
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
+        "a=rtpmap:97 H264/90000\r\n"
+        "a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n"
+        "a=rtpmap:98 H264/90000\r\n"
+        "a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f\r\n"
+        "a=rtcp-fb:96 goog-remb\r\n"
+        "a=rtcp-fb:96 transport-cc\r\n"
+        "a=rtcp-fb:96 ccm fir\r\n"
+        "a=rtcp-fb:96 nack\r\n"
+        "a=rtcp-fb:96 nack pli\r\n";
 
-    video_track = rtcAddTrack(whep->peer_connection, video_sdp);
-    if (video_track < 0) {
-        av_log(avctx, AV_LOG_ERROR, "添加视频 track 失败: %d\n", video_track);
+    whep->video_track = rtcAddTrack(whep->peer_connection, video_sdp);
+    if (whep->video_track < 0) {
+        av_log(avctx, AV_LOG_ERROR, "添加视频 track 失败: %d\n", whep->video_track);
         ret = AVERROR_EXTERNAL;
         goto fail;
     }
-    av_log(avctx, AV_LOG_INFO, "视频 track 添加成功 (ID: %d)\n", video_track);
+    av_log(avctx, AV_LOG_INFO, "视频 track 添加成功 (ID: %d)\n", whep->video_track);
 
-    // 设置为接收模式（WHEP 是接收端）
-    rtcSetLocalDescription(whep->peer_connection, "offer");
+    // 设置视频 track 回调
+    rtcSetOpenCallback(whep->video_track, on_track_open);
+    rtcSetMessageCallback(whep->video_track, on_video_message);
+    rtcSetUserPointer(whep->video_track, whep);
 
-    av_log(avctx, AV_LOG_INFO, "等待本地 SDP 生成...\n");
-
-    // 等待本地 SDP 生成（最多等待5秒）
-    int64_t start_time = av_gettime_relative();
-    while (!whep->local_sdp) {
-        if (av_gettime_relative() - start_time > 5000000) { // 5秒超时
-            av_log(avctx, AV_LOG_ERROR, "等待本地 SDP 超时\n");
-            ret = AVERROR(ETIMEDOUT);
-            goto fail;
-        }
-        av_usleep(10000); // 10ms
-    }
-
-    av_log(avctx, AV_LOG_INFO, "本地 SDP 生成完成\n");
+    av_log(avctx, AV_LOG_INFO, "PeerConnection 初始化完成，回调已设置\n");
     return 0;
 
 fail:
@@ -316,30 +228,6 @@ fail:
     return ret;
 }
 
-/**
- * 设置远端 SDP answer
- */
-static int whep_set_remote_description(AVFormatContext *avctx)
-{
-    WHEPContext *whep = avctx->priv_data;
-    int ret;
-
-    if (!whep->remote_sdp) {
-        av_log(avctx, AV_LOG_ERROR, "远端 SDP 为空\n");
-        return AVERROR(EINVAL);
-    }
-
-    av_log(avctx, AV_LOG_INFO, "设置远端描述...\n");
-
-    ret = rtcSetRemoteDescription(whep->peer_connection, whep->remote_sdp, "answer");
-    if (ret < 0) {
-        av_log(avctx, AV_LOG_ERROR, "设置远端描述失败: %d\n", ret);
-        return AVERROR_EXTERNAL;
-    }
-
-    av_log(avctx, AV_LOG_INFO, "远端描述设置成功\n");
-    return 0;
-}
 
 /**
  * 向队列中添加packet的辅助函数
@@ -441,27 +329,22 @@ static av_cold int whep_read_header(AVFormatContext *avctx)
     whep->abort_request = 0;
     whep->eof_reached = 0;
     whep->peer_connection = -1;
+    whep->audio_track = -1;
+    whep->video_track = -1;
 
     // === WHEP 流程：初始化 WebRTC 并交换 SDP ===
     
-    // 1. 初始化 PeerConnection 并生成 SDP offer
+    // 1. 初始化 PeerConnection 并添加 tracks
     ret = whep_init_peer_connection(avctx);
     if (ret < 0) {
         av_log(avctx, AV_LOG_ERROR, "初始化 PeerConnection 失败\n");
         goto fail;
     }
 
-    // 2. 通过 HTTP POST 交换 SDP
-    ret = whep_exchange_sdp(avctx);
+    // 2. 使用共享函数交换 SDP 并设置远端描述
+    ret = ff_whip_whep_exchange_and_set_sdp(avctx, whep->peer_connection, whep->token, &whep->resource_url);
     if (ret < 0) {
         av_log(avctx, AV_LOG_ERROR, "SDP 交换失败\n");
-        goto fail;
-    }
-
-    // 3. 设置远端 SDP answer
-    ret = whep_set_remote_description(avctx);
-    if (ret < 0) {
-        av_log(avctx, AV_LOG_ERROR, "设置远端描述失败\n");
         goto fail;
     }
 
@@ -578,6 +461,12 @@ static av_cold int whep_read_close(AVFormatContext *avctx)
     pthread_cond_broadcast(&whep->cond);
     pthread_mutex_unlock(&whep->mutex);
 
+    // 使用共享函数删除 WHEP 会话
+    if (whep->resource_url) {
+        av_log(avctx, AV_LOG_INFO, "删除 WHEP 会话...\n");
+        ff_whip_whep_delete_session(avctx, whep->token, whep->resource_url);
+    }
+
     // 关闭 PeerConnection
     if (whep->peer_connection >= 0) {
         av_log(avctx, AV_LOG_INFO, "关闭 PeerConnection...\n");
@@ -612,8 +501,7 @@ static av_cold int whep_read_close(AVFormatContext *avctx)
 
     // 清理内存
     av_freep(&whep->whep_url);
-    av_freep(&whep->local_sdp);
-    av_freep(&whep->remote_sdp);
+    av_freep(&whep->token);
     av_freep(&whep->resource_url);
 
     whep->initialized = 0;
@@ -651,6 +539,7 @@ static const AVOption whep_options[] = {
     { "timeout", "Connection timeout in milliseconds", OFFSET(timeout), AV_OPT_TYPE_INT, {.i64 = 5000}, 0, INT_MAX, DEC },
     { "buffer_size", "Buffer size for incoming packets", OFFSET(buffer_size), AV_OPT_TYPE_INT, {.i64 = 1024*1024}, 0, INT_MAX, DEC },
     { "max_retry", "Maximum number of reconnection attempts", OFFSET(max_retry), AV_OPT_TYPE_INT, {.i64 = 3}, 0, 100, DEC },
+    { "token", "Bearer token for authentication", OFFSET(token), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
     { NULL },
 };
 
