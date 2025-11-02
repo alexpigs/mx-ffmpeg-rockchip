@@ -55,3 +55,7 @@ https://github.com/paullouisageneau/libdatachannel/blob/master/README.md
 
 
 sudo ./ffmpeg_g -loglevel debug -fflags +genpts  -hwaccel rkmpp -hwaccel_output_format drm_prime -re -stream_loop -1 -f whep -i "https://rtc.nestbox.top:1990/rtc/v1/whep/?app=live&stream=livestream" -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -r 30 -f mxcam -phone 2 -
+
+
+
+sudo ./ffmpeg_g -loglevel debug -fflags +genpts  -hwaccel rkmpp -hwaccel_output_format drm_prime -re -stream_loop -1 -f whep -i "http://rtc.nestbox.top:1985/rtc/v1/whep/?app=live&stream=livestream" -vf "scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -r 30 -f mxcam -phone 2 -

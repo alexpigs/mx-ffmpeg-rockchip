@@ -1,0 +1,167 @@
+# FFmpeg WHEP 项目 Makefile
+# 用于管理 WHEP 相关的编译、测试和清理
+
+.PHONY: all help build test clean metartc ffmpeg install-deps
+
+# 默认目标
+all: help
+
+# 帮助信息
+help:
+	@echo "FFmpeg WHEP 项目管理"
+	@echo "===================="
+	@echo ""
+	@echo "可用目标:"
+	@echo "  make build         - 一键编译 FFmpeg + metaRTC"
+	@echo "  make metartc       - 只编译 metaRTC 库"
+	@echo "  make ffmpeg        - 只编译 FFmpeg（需要先编译 metaRTC）"
+	@echo "  make test          - 测试 WHEP 功能"
+	@echo "  make install-deps  - 安装系统依赖"
+	@echo "  make clean         - 清理编译产物"
+	@echo "  make clean-all     - 清理所有（包括 metaRTC）"
+	@echo ""
+	@echo "快速开始:"
+	@echo "  make build         # 一键编译"
+	@echo "  make test          # 测试功能"
+	@echo ""
+	@echo "详细文档:"
+	@echo "  README_WHEP.md     - 项目概述"
+	@echo "  QUICK_START.md     - 快速开始"
+	@echo "  WHEP_USAGE.md      - 使用指南"
+	@echo ""
+
+# 安装系统依赖
+install-deps:
+	@echo "安装系统依赖..."
+	@if [ -f "deps/metaRTC/install_dependencies.sh" ]; then \
+		cd deps/metaRTC && chmod +x install_dependencies.sh && ./install_dependencies.sh; \
+	else \
+		echo "手动安装依赖:"; \
+		echo "  sudo apt install -y build-essential cmake git libssl-dev libsrtp2-dev pkg-config"; \
+	fi
+
+# 编译 metaRTC
+metartc:
+	@echo "编译 metaRTC 库..."
+	@if [ ! -d "deps/metaRTC" ]; then \
+		echo "错误: 找不到 deps/metaRTC 目录"; \
+		exit 1; \
+	fi
+	@cd deps/metaRTC && \
+		if [ -f "quick_build.sh" ]; then \
+			chmod +x quick_build.sh && ./quick_build.sh; \
+		else \
+			echo "错误: 找不到 quick_build.sh"; \
+			exit 1; \
+		fi
+
+# 配置并编译 FFmpeg
+ffmpeg:
+	@echo "配置 FFmpeg..."
+	@if [ -f "configure_with_metartc.sh" ]; then \
+		chmod +x configure_with_metartc.sh && ./configure_with_metartc.sh; \
+	else \
+		echo "错误: 找不到 configure_with_metartc.sh"; \
+		exit 1; \
+	fi
+	@echo "编译 FFmpeg..."
+	@$(MAKE) -j$$(nproc)
+
+# 一键编译（推荐）
+build:
+	@echo "一键编译 FFmpeg + metaRTC..."
+	@if [ -f "build_with_metartc.sh" ]; then \
+		chmod +x build_with_metartc.sh && ./build_with_metartc.sh; \
+	else \
+		echo "build_with_metartc.sh 不存在，使用分步编译..."; \
+		$(MAKE) metartc && $(MAKE) ffmpeg; \
+	fi
+
+# 测试 WHEP 功能
+test:
+	@echo "测试 WHEP 功能..."
+	@if [ ! -f "./ffmpeg" ]; then \
+		echo "错误: ffmpeg 可执行文件不存在，请先编译"; \
+		echo "运行: make build"; \
+		exit 1; \
+	fi
+	@if [ -f "test_whep.sh" ]; then \
+		chmod +x test_whep.sh && ./test_whep.sh; \
+	else \
+		echo "手动测试:"; \
+		echo "  ./ffmpeg -formats | grep whep"; \
+		./ffmpeg -formats | grep whep; \
+	fi
+
+# 清理 FFmpeg 编译产物
+clean:
+	@echo "清理 FFmpeg 编译产物..."
+	@if [ -f "Makefile" ] && [ -f "config.h" ]; then \
+		$(MAKE) clean || true; \
+	fi
+	@rm -f ffmpeg ffplay ffprobe
+	@echo "清理完成"
+
+# 清理所有（包括 metaRTC）
+clean-all: clean
+	@echo "清理 metaRTC 编译产物..."
+	@if [ -d "deps/metaRTC" ]; then \
+		cd deps/metaRTC && \
+		rm -rf libmetartccore7/build libyangwhip7/build libmetartc7/build && \
+		rm -rf bin/lib_debug/*.a; \
+	fi
+	@rm -rf config.log config.h ffbuild/
+	@echo "全部清理完成"
+
+# 显示版本信息
+version:
+	@if [ -f "./ffmpeg" ]; then \
+		./ffmpeg -version | head -n 1; \
+	else \
+		echo "ffmpeg 未编译"; \
+	fi
+
+# 显示 WHEP 信息
+info:
+	@echo "FFmpeg WHEP 解复用器信息"
+	@echo "========================"
+	@echo ""
+	@if [ -f "./ffmpeg" ]; then \
+		echo "FFmpeg 版本:"; \
+		./ffmpeg -version | head -n 1; \
+		echo ""; \
+		echo "WHEP 支持:"; \
+		./ffmpeg -formats 2>&1 | grep whep || echo "未启用"; \
+		echo ""; \
+		echo "支持的解码器:"; \
+		./ffmpeg -decoders 2>&1 | grep -E "h264|hevc|opus|aac" | head -n 4; \
+	else \
+		echo "ffmpeg 未编译"; \
+	fi
+	@echo ""
+	@if [ -d "deps/metaRTC/bin/lib_debug" ]; then \
+		echo "metaRTC 库:"; \
+		ls -lh deps/metaRTC/bin/lib_debug/*.a 2>/dev/null || echo "未编译"; \
+	fi
+
+# 运行示例
+examples:
+	@if [ -f "examples/whep_examples.sh" ]; then \
+		chmod +x examples/whep_examples.sh && examples/whep_examples.sh; \
+	else \
+		echo "错误: 找不到 examples/whep_examples.sh"; \
+	fi
+
+# 查看文档
+docs:
+	@echo "可用文档:"
+	@echo ""
+	@ls -1 *.md 2>/dev/null | while read file; do \
+		echo "  $$file"; \
+	done
+	@echo ""
+	@echo "查看文档:"
+	@echo "  less README_WHEP.md"
+	@echo "  less QUICK_START.md"
+	@echo "  less WHEP_USAGE.md"
+
