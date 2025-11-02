@@ -22,7 +22,6 @@ extern "C" {
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/thread.h"
-#include "libavutil/time.h"
 #include <libavutil/audio_fifo.h>
 #include <libavutil/fifo.h>
 #include <libavutil/hwcontext.h>
