@@ -47,8 +47,8 @@
 using namespace std::chrono;
 using boost::asio::ip::tcp;
 
-static inline char *av_err2str2(int errnum) {
-  static char errbuf_static[AV_ERROR_MAX_STRING_SIZE] = {0};
+static inline const char *av_err2str2(int errnum) {
+  thread_local char errbuf_static[AV_ERROR_MAX_STRING_SIZE] = {0};
   av_strerror(errnum, errbuf_static, AV_ERROR_MAX_STRING_SIZE);
   return errbuf_static;
 }
@@ -374,6 +374,8 @@ class MxImage2D {
 
   rga_buffer_handle_t mDmaBufferHandle1 = 0;
   rga_buffer_handle_t mDmaBufferHandle2 = 0;
+  
+  std::mutex mDmaBufferMutex; // 保护 DMA 缓冲区操作
 
 private:
   MxImage2D() {}
@@ -450,6 +452,7 @@ public:
   int process_image_nv12(void *src, int src_size, int src_width, int src_height,
                          int sw_stride, int sh_stride, void **dst,
                          int dst_width, int dst_height, int dst_rotate) {
+    std::lock_guard<std::mutex> lock(mDmaBufferMutex); // 保护 DMA 缓冲区
     memcpy(mDmaBuffer1, src, src_size);
     int ret = IM_STATUS_NOERROR;
     int new_width = 0;
@@ -580,12 +583,9 @@ private:
   std::mutex mMxCacheMutex; // 音视频共用锁, 调试用
 
   std::list<AVFrame *> mVideoFrameCache;
-  std::mutex mVideoMutex;
   std::condition_variable mVideoCond;
 
-  std::mutex mAudioBufferMutex;
   std::condition_variable mAudioBufferCond;
-  std::mutex mAudioBufferCondMutext;
   AVFifo *mAudioFifo = NULL;
   float mVolumn = 5.0; // 声音大小
 
@@ -649,9 +649,12 @@ public:
       // ALOGE("av_fifo_drain2 %d bytes", size - space);
     }
 
-    multiply_by_volume(mVolumn, (int16_t *)buf, size / 2);
+    // 分配临时缓冲区，避免修改 const 数据
+    std::vector<uint8_t> temp_buf(size);
+    memcpy(temp_buf.data(), buf, size);
+    multiply_by_volume(mVolumn, (int16_t *)temp_buf.data(), size / 2);
 
-    ret = av_fifo_write(mAudioFifo, buf, size);
+    ret = av_fifo_write(mAudioFifo, temp_buf.data(), size);
     if (ret < 0) {
       ALOGE("audio fifo write failed %d", ret);
       return;
@@ -850,7 +853,7 @@ public:
       return -1;
     }
 
-    static char reply_header[16] = {0};
+    char reply_header[16] = {0}; // 改为栈变量，线程安全
     if (reply_size > 0) {
       snprintf(reply_header, sizeof(reply_header), "%08xok:", reply_size + 3);
     } else {
@@ -1049,7 +1052,7 @@ public:
 
     int audio_size = 0, format = 0, sample_rate_hz = 0, ch = 0, tt = 0;
 
-    int x = sscanf(params, "audio=%zu format=%d hz=%d ch=%d time=%d",
+    int x = sscanf(params, "audio=%d format=%d hz=%d ch=%d time=%d",
                    &audio_size, &format, &sample_rate_hz, &ch, &tt);
     if (x != 5) {
       ALOGE("parse query_param failed");
@@ -1173,6 +1176,18 @@ int mxcam_handle_packet(AVFormatContext *s1, AVPacket *pkt) {
 
 int mxcam_stop_server(MxContext *mx) {
   mx->is_stop = 1;
+  
+  // 等待线程退出，防止资源泄漏
+  if (mx->audio_io_worker) {
+    pthread_join(mx->audio_io_worker, NULL);
+    mx->audio_io_worker = 0;
+  }
+  if (mx->video_io_worker) {
+    pthread_join(mx->video_io_worker, NULL);
+    mx->video_io_worker = 0;
+  }
+  
+  ALOGD("mxcam_stop_server completed, threads joined");
   return 0;
 }
 
