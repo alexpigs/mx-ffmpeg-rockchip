@@ -24,7 +24,11 @@
  * WHEP (WebRTC HTTP Egress Protocol) demuxer
  * Based on metaRTC libmetartccore7
  * 
- * WHEP 协议从 SRS 等流媒体服务器拉取 WebRTC 流
+ * 使用 SRS 专用 WebRTC 协议从 SRS 流媒体服务器拉取流
+ * 支持的 URL 格式:
+ *   - webrtc://host:port/app/stream  (SRS 专用格式，推荐)
+ *   - whep://host:port/endpoint      (标准 WHEP 协议)
+ *   - http://host:port/rtc/v1/play/  (SRS HTTP API)
  */
 
 #include "avformat.h"
@@ -44,6 +48,7 @@
 #include <yangrtc/YangPeerInfo.h>
 #include <yangrtc/YangWhip.h>
 #include <yangutil/yangavinfo.h>
+#include <yangssl/YangOpenssl.h>
 #include <yangutil/yangtype.h>
 #include <yangutil/sys/YangLog.h>
 
@@ -261,7 +266,7 @@ static int whep_probe(const AVProbeData *p)
         (av_stristart(p->filename, "http://", NULL) && strstr(p->filename, "/whep/")) ||
         (av_stristart(p->filename, "https://", NULL) && strstr(p->filename, "/whep/")))
         return AVPROBE_SCORE_MAX;
-    
+
     return 0;
 }
 
@@ -324,18 +329,87 @@ static int whep_read_header(AVFormatContext *s)
     
     /* 设置基本系统参数 */
     whep->av_info.sys.familyType = Yang_IpFamilyType_IPV4; /* 默认 IPv4 */
-    whep->av_info.sys.mediaServer = Yang_Server_Whip_Whep;
+    whep->av_info.sys.mediaServer = Yang_Server_Srs; /* 使用 SRS 专用协议 */
     
-    /* 配置 WHEP URL */
+    /* 配置 URL (支持多种格式) */
     if (s->url) {
-        /* 转换 whep:// -> http:// */
-        if (av_stristart(s->url, "whep://", NULL)) {
+        /* SRS WebRTC 协议格式: webrtc://host:port/app/stream */
+        if (av_stristart(s->url, "webrtc://", NULL)) {
+            /* SRS 专用格式，直接使用 */
+            av_strlcpy(whep->av_info.sys.whepUrl, s->url, sizeof(whep->av_info.sys.whepUrl));
+        }
+        /* HTTP WHEP URL 格式: http://host:port/rtc/v1/whep/?app=xxx&stream=yyy */
+        else if (av_stristart(s->url, "http://", NULL) || av_stristart(s->url, "https://", NULL)) {
+            /* 检查是否包含 app 和 stream 参数 */
+            const char *app_param = strstr(s->url, "app=");
+            const char *stream_param = strstr(s->url, "stream=");
+            
+            if (app_param && stream_param) {
+                char hostname[256] = {0};
+                char app[128] = {0};
+                char stream[128] = {0};
+                int port = 1985; /* 默认 SRS 端口 */
+                
+                /* 解析主机名和端口 */
+                const char *url_start = strchr(s->url, ':') + 3; /* 跳过 "http://" */
+                const char *port_sep = strchr(url_start, ':');
+                const char *path_sep = strchr(url_start, '/');
+                
+                if (port_sep && path_sep && port_sep < path_sep) {
+                    /* 有端口号 */
+                    size_t host_len = port_sep - url_start;
+                    if (host_len > sizeof(hostname) - 1) host_len = sizeof(hostname) - 1;
+                    memcpy(hostname, url_start, host_len);
+                    hostname[host_len] = '\0';
+                    port = atoi(port_sep + 1);
+                } else if (path_sep) {
+                    /* 没有端口号 */
+                    size_t host_len = path_sep - url_start;
+                    if (host_len > sizeof(hostname) - 1) host_len = sizeof(hostname) - 1;
+                    memcpy(hostname, url_start, host_len);
+                    hostname[host_len] = '\0';
+                }
+                
+                /* 解析 app 参数 */
+                const char *app_start = app_param + 4; /* 跳过 "app=" */
+                const char *app_end = strchr(app_start, '&');
+                if (!app_end) app_end = app_start + strlen(app_start);
+                size_t app_len = app_end - app_start;
+                if (app_len > sizeof(app) - 1) app_len = sizeof(app) - 1;
+                memcpy(app, app_start, app_len);
+                app[app_len] = '\0';
+                
+                /* 解析 stream 参数 */
+                const char *stream_start = stream_param + 7; /* 跳过 "stream=" */
+                const char *stream_end = strchr(stream_start, '&');
+                if (!stream_end) stream_end = stream_start + strlen(stream_start);
+                size_t stream_len = stream_end - stream_start;
+                if (stream_len > sizeof(stream) - 1) stream_len = sizeof(stream) - 1;
+                memcpy(stream, stream_start, stream_len);
+                stream[stream_len] = '\0';
+                
+                /* 构造 webrtc:// URL */
+                snprintf(whep->av_info.sys.whepUrl, sizeof(whep->av_info.sys.whepUrl),
+                         "webrtc://%s:%d/%s/%s", hostname, port, app, stream);
+                
+                av_log(s, AV_LOG_INFO, "从 HTTP URL 转换为 SRS WebRTC URL: %s\n", whep->av_info.sys.whepUrl);
+            } else {
+                /* 不是 SRS 格式的 WHEP URL，直接使用 */
+                av_strlcpy(whep->av_info.sys.whepUrl, s->url, sizeof(whep->av_info.sys.whepUrl));
+            }
+        }
+        /* 标准 WHEP 格式: whep://host:port/path -> http://host:port/path */
+        else if (av_stristart(s->url, "whep://", NULL)) {
             snprintf(whep->av_info.sys.whepUrl, sizeof(whep->av_info.sys.whepUrl),
                      "http://%s", s->url + 7);
-        } else if (av_stristart(s->url, "wheps://", NULL)) {
+        } 
+        /* 安全 WHEP: wheps://host:port/path -> https://host:port/path */
+        else if (av_stristart(s->url, "wheps://", NULL)) {
             snprintf(whep->av_info.sys.whepUrl, sizeof(whep->av_info.sys.whepUrl),
                      "https://%s", s->url + 8);
-        } else {
+        } 
+        /* 其他格式，直接使用 */
+        else {
             av_strlcpy(whep->av_info.sys.whepUrl, s->url, sizeof(whep->av_info.sys.whepUrl));
         }
     }
@@ -344,6 +418,7 @@ static int whep_read_header(AVFormatContext *s)
     whep->av_info.rtc.sessionTimeout = whep->timeout * 1000; /* 转换为毫秒 */
     whep->av_info.rtc.iceCandidateType = YangIceHost; /* 默认 host 候选 */
     whep->av_info.rtc.rtcLocalPort = 16000; /* 本地 RTC 端口 */
+    whep->av_info.rtc.rtcSocketProtocol = Yang_Socket_Protocol_Udp; /* UDP 传输 */
     
     /* 初始化整个 PeerConnection 结构体 */
     memset(&whep->peer_conn, 0, sizeof(YangPeerConnection));
@@ -364,13 +439,17 @@ static int whep_read_header(AVFormatContext *s)
     whep->peer_conn.peer.peerCallback.rtcCallback.context = whep;
     whep->peer_conn.peer.peerCallback.rtcCallback.setMediaConfig = on_media_config;
     
-    /* 创建 PeerConnection */
+    /* 手动初始化全局 SRTP（确保 libsrtp 库已初始化） */
+    g_yang_create_srtp();
+    av_log(s, AV_LOG_INFO, "全局 SRTP 已初始化\n");
+    
+    /* 创建 PeerConnection（会自动初始化 Peer、RTC context、DTLS、SRTP 等） */
     yang_create_peerConnection(&whep->peer_conn);
     
     /* 添加音频轨道（接收） */
     if (whep->audio_enabled) {
         ret = whep->peer_conn.addAudioTrack(&whep->peer_conn.peer, Yang_AED_OPUS);
-        if (ret < 0) {
+    if (ret < 0) {
             av_log(s, AV_LOG_WARNING, "添加音频轨道失败: %d\n", ret);
         } else {
             whep->peer_conn.addTransceiver(&whep->peer_conn.peer, YangMediaAudio, YangRecvonly);
@@ -380,34 +459,56 @@ static int whep_read_header(AVFormatContext *s)
     /* 添加视频轨道（接收） */
     if (whep->video_enabled) {
         ret = whep->peer_conn.addVideoTrack(&whep->peer_conn.peer, Yang_VED_H264);
-        if (ret < 0) {
+    if (ret < 0) {
             av_log(s, AV_LOG_WARNING, "添加视频轨道失败: %d\n", ret);
         } else {
             whep->peer_conn.addTransceiver(&whep->peer_conn.peer, YangMediaVideo, YangRecvonly);
         }
     }
     
-    /* 连接 WHEP 服务器 */
-    av_log(s, AV_LOG_INFO, "连接 WHEP 服务器: %s\n", whep->av_info.sys.whepUrl);
+    /* 连接 SRS 服务器 (使用专用协议) */
+    av_log(s, AV_LOG_INFO, "连接 SRS WebRTC 服务器: %s\n", whep->av_info.sys.whepUrl);
     
-    /* yang_whip_connectWhipWhepServer 内部会创建 Offer、设置本地描述、
-     * 通过 HTTP POST 发送到 WHEP 服务器、接收 Answer 并设置远端描述 */
-    ret = yang_whip_connectWhipWhepServer(&whep->peer_conn.peer, whep->av_info.sys.whepUrl);
+    /* yang_whip_connectSfuServer 使用 SRS 专用 API 连接
+     * 内部会创建 Offer、设置本地描述、
+     * 通过 SRS 专用 HTTP API (/rtc/v1/play/) 发送、
+     * 接收 Answer 并设置远端描述 */
+    ret = yang_whip_connectSfuServer(&whep->peer_conn.peer, 
+                                      whep->av_info.sys.whepUrl, 
+                                      Yang_Server_Srs);
     
-    av_log(s, AV_LOG_DEBUG, "yang_whip_connectWhipWhepServer 返回值: %d (Yang_Ok=%d)\n", ret, Yang_Ok);
+    av_log(s, AV_LOG_DEBUG, "yang_whip_connectSfuServer 返回值: %d (Yang_Ok=%d)\n", ret, Yang_Ok);
     
     if (ret != Yang_Ok) {
-        av_log(s, AV_LOG_ERROR, "WHEP 信令交换失败: %d\n", ret);
+        av_log(s, AV_LOG_ERROR, "SRS WebRTC 信令交换失败: %d\n", ret);
         return AVERROR(EIO);
     }
     
-    av_log(s, AV_LOG_INFO, "WHEP 信令交换成功，等待 ICE 连接建立\n");
+    av_log(s, AV_LOG_INFO, "SRS WebRTC 信令交换成功，等待连接建立（ICE+DTLS）\n");
     
     /* 等待连接建立（最多 timeout 秒） */
     int wait_time = 0;
-    while (!whep->connected && wait_time < whep->timeout * 10) {
+    YangRtcConnectionState conn_state = Yang_Conn_State_New;
+    
+    while (wait_time < whep->timeout * 10) {
         av_usleep(100000); /* 100ms */
         wait_time++;
+        
+        /* 查询连接状态 */
+        conn_state = whep->peer_conn.getConnectionState(&whep->peer_conn.peer);
+        
+        av_log(s, AV_LOG_DEBUG, "连接状态: %d (0=New, 1=Connecting, 2=Connected, 3=Disconnected, 4=Failed, 5=Closed)\n", conn_state);
+        
+        if (conn_state == Yang_Conn_State_Connected) {
+            av_log(s, AV_LOG_INFO, "✅ SRS WebRTC 连接已建立 (DTLS 握手完成，SRTP 已就绪)\n");
+            whep->connected = 1;
+            break;
+        }
+        
+        if (conn_state == Yang_Conn_State_Failed || conn_state == Yang_Conn_State_Closed) {
+            av_log(s, AV_LOG_ERROR, "❌ SRS WebRTC 连接失败，状态: %d\n", conn_state);
+            return AVERROR(EIO);
+        }
         
         if (whep->eof) {
             av_log(s, AV_LOG_ERROR, "连接失败\n");
@@ -416,7 +517,7 @@ static int whep_read_header(AVFormatContext *s)
     }
     
     if (!whep->connected) {
-        av_log(s, AV_LOG_ERROR, "连接超时\n");
+        av_log(s, AV_LOG_ERROR, "连接超时，最终状态: %d\n", conn_state);
         return AVERROR(ETIMEDOUT);
     }
     
@@ -477,9 +578,9 @@ static int whep_read_packet(AVFormatContext *s, AVPacket *pkt)
             if (ret < 0) {
                 yang_free(frame->payload);
                 yang_free(frame);
-                return ret;
-            }
-            
+    return ret;
+}
+
             memcpy(pkt->data, frame->payload, frame->nb);
             pkt->stream_index = whep->video_stream->index;
             pkt->pts = frame->pts;
@@ -549,6 +650,10 @@ static int whep_read_close(AVFormatContext *s)
     frame_queue_destroy(&whep->audio_queue);
     frame_queue_destroy(&whep->video_queue);
     
+    /* 销毁全局 SRTP */
+    g_yang_destroy_srtp();
+    av_log(s, AV_LOG_DEBUG, "全局 SRTP 已清理\n");
+    
     return 0;
 }
 
@@ -577,7 +682,7 @@ static const AVClass whep_demuxer_class = {
 
 const FFInputFormat ff_whep_demuxer = {
     .p.name         = "whep",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("WHEP (WebRTC HTTP Egress Protocol)"),
+    .p.long_name    = NULL_IF_CONFIG_SMALL("SRS WebRTC / WHEP Protocol (via metaRTC)"),
     .p.flags        = AVFMT_NOFILE | AVFMT_NOGENSEARCH,
     .p.priv_class   = &whep_demuxer_class,
     .priv_data_size = sizeof(WHEPContext),
