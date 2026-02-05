@@ -37,12 +37,10 @@ enum AVHWDeviceType {
     AV_HWDEVICE_TYPE_OPENCL,
     AV_HWDEVICE_TYPE_MEDIACODEC,
     AV_HWDEVICE_TYPE_VULKAN,
-    AV_HWDEVICE_TYPE_D3D12VA,
-    AV_HWDEVICE_TYPE_AMF,
-    /* OpenHarmony Codec device */
-    AV_HWDEVICE_TYPE_OHCODEC,
     AV_HWDEVICE_TYPE_RKMPP,
 };
+
+typedef struct AVHWDeviceInternal AVHWDeviceInternal;
 
 /**
  * This struct aggregates all the (hardware/vendor-specific) "high-level" state,
@@ -66,6 +64,12 @@ typedef struct AVHWDeviceContext {
      * A class for logging. Set by av_hwdevice_ctx_alloc().
      */
     const AVClass *av_class;
+
+    /**
+     * Private data used internally by libavutil. Must not be accessed in any
+     * way by the caller.
+     */
+    AVHWDeviceInternal *internal;
 
     /**
      * This field identifies the underlying API used for hardware access.
@@ -106,6 +110,8 @@ typedef struct AVHWDeviceContext {
     void *user_opaque;
 } AVHWDeviceContext;
 
+typedef struct AVHWFramesInternal AVHWFramesInternal;
+
 /**
  * This struct describes a set or pool of "hardware" frames (i.e. those with
  * data not located in normal system memory). All the frames in the pool are
@@ -121,6 +127,12 @@ typedef struct AVHWFramesContext {
      * A class for logging.
      */
     const AVClass *av_class;
+
+    /**
+     * Private data used internally by libavutil. Must not be accessed in any
+     * way by the caller.
+     */
+    AVHWFramesInternal *internal;
 
     /**
      * A reference to the parent AVHWDeviceContext. This reference is owned and
@@ -141,12 +153,9 @@ typedef struct AVHWFramesContext {
      * The format-specific data, allocated and freed automatically along with
      * this context.
      *
-     * The user shall ignore this field if the corresponding format-specific
-     * header (hwcontext_*.h) does not define a context to be used as
-     * AVHWFramesContext.hwctx.
-     *
-     * Otherwise, it should be cast by the user to said context and filled
-     * as described in the documentation before calling av_hwframe_ctx_init().
+     * Should be cast by the user to the format-specific context defined in the
+     * corresponding header (hwframe_*.h) and filled as described in the
+     * documentation before calling av_hwframe_ctx_init().
      *
      * After any frames using this context are created, the contents of this
      * struct should not be modified by the caller.
@@ -564,7 +573,7 @@ enum {
  * values indicate that it failed somehow.
  *
  * On failure, the destination frame will be left blank, except for the
- * hw_frames_ctx/format fields they may have been set by the caller - those will
+ * hw_frames_ctx/format fields thay may have been set by the caller - those will
  * be preserved as they were.
  *
  * @param dst Destination frame, to contain the mapping.

@@ -39,14 +39,13 @@
 #include "libavutil/avstring.h"
 #include "libavutil/hwcontext_rkmpp.h"
 #include "libavutil/mastering_display_metadata.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 
 #define MAX_SOC_NAME_LENGTH 128
 
 typedef struct RKMPPDecContext {
-    AVClass       *class;
+    const AVClass *class;
 
     MppApi        *mapi;
     MppCtx         mctx;
@@ -94,15 +93,24 @@ static const AVRational mpp_tb = { 1, 1000000 };
 
 static const AVOption options[] = {
     { "deint",      "Enable IEP (Image Enhancement Processor) for de-interlacing", OFFSET(deint), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
-    { "afbc",       "Enable AFBC (Arm Frame Buffer Compression) to save bandwidth", OFFSET(afbc), AV_OPT_TYPE_INT, { .i64 = RKMPP_DEC_AFBC_OFF }, 0, 2, VD, .unit = "afbc" },
-        { "off",    "Disable AFBC support",                    0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_OFF    }, 0, 0, VD, .unit = "afbc" },
-        { "on",     "Enable AFBC support",                     0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_ON     }, 0, 0, VD, .unit = "afbc" },
-        { "rga",    "Enable AFBC if capable RGA is available", 0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_ON_RGA }, 0, 0, VD, .unit = "afbc" },
+    { "afbc",       "Enable AFBC (Arm Frame Buffer Compression) to save bandwidth", OFFSET(afbc), AV_OPT_TYPE_INT, { .i64 = RKMPP_DEC_AFBC_OFF }, 0, 2, VD, "afbc" },
+        { "off",    "Disable AFBC support",                    0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_OFF    }, 0, 0, VD, "afbc" },
+        { "on",     "Enable AFBC support",                     0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_ON     }, 0, 0, VD, "afbc" },
+        { "rga",    "Enable AFBC if capable RGA is available", 0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_AFBC_ON_RGA }, 0, 0, VD, "afbc" },
     { "fast_parse", "Enable fast parsing to improve decoding parallelism", OFFSET(fast_parse), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
-    { "buf_mode",   "Set the buffer mode for MPP decoder", OFFSET(buf_mode), AV_OPT_TYPE_INT, { .i64 = RKMPP_DEC_HALF_INTERNAL }, 0, 1, VD, .unit = "buf_mode" },
-        { "half",   "Half internal mode",                      0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_HALF_INTERNAL }, 0, 0, VD, .unit = "buf_mode" },
-        { "ext",    "Pure external mode",                      0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_PURE_EXTERNAL }, 0, 0, VD, .unit = "buf_mode" },
+    { "buf_mode",   "Set the buffer mode for MPP decoder", OFFSET(buf_mode), AV_OPT_TYPE_INT, { .i64 = RKMPP_DEC_HALF_INTERNAL }, 0, 1, VD, "buf_mode" },
+        { "half",   "Half internal mode",                      0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_HALF_INTERNAL }, 0, 0, VD, "buf_mode" },
+        { "ext",    "Pure external mode",                      0, AV_OPT_TYPE_CONST, { .i64 = RKMPP_DEC_PURE_EXTERNAL }, 0, 0, VD, "buf_mode" },
     { NULL }
+};
+
+static const enum AVPixelFormat rkmpp_dec_pix_fmts[] = {
+    AV_PIX_FMT_NV12,
+    AV_PIX_FMT_NV16,
+    AV_PIX_FMT_NV15,
+    AV_PIX_FMT_NV20,
+    AV_PIX_FMT_DRM_PRIME,
+    AV_PIX_FMT_NONE,
 };
 
 static const AVCodecHWConfigInternal *const rkmpp_dec_hw_configs[] = {
@@ -142,6 +150,7 @@ const FFCodec ff_##x##_rkmpp_decoder = { \
                       AV_CODEC_CAP_HARDWARE, \
     .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE | \
                       FF_CODEC_CAP_SETS_FRAME_PROPS, \
+    .p.pix_fmts     = rkmpp_dec_pix_fmts, \
     .hw_configs     = rkmpp_dec_hw_configs, \
     .p.wrapper_name = "rkmpp", \
 };

@@ -36,7 +36,6 @@
 #include "hwcontext_rkmpp.h"
 #include "hwcontext_internal.h"
 #include "imgutils.h"
-#include "mem.h"
 
 static const struct {
     enum AVPixelFormat pixfmt;
@@ -310,10 +309,10 @@ static int rkmpp_frames_init(AVHWFramesContext *hwfc)
         return AVERROR_EXTERNAL;
     }
 
-    ffhwframesctx(hwfc)->pool_internal =
+    hwfc->internal->pool_internal =
         av_buffer_pool_init2(sizeof(AVRKMPPDRMFrameDescriptor), hwfc,
                              rkmpp_drm_pool_alloc, NULL);
-    if (!ffhwframesctx(hwfc)->pool_internal) {
+    if (!hwfc->internal->pool_internal) {
         av_log(hwfc, AV_LOG_ERROR, "Failed to create RKMPP buffer pool.\n");
         return AVERROR(ENOMEM);
     }
