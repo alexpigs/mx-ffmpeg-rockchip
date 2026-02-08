@@ -217,7 +217,7 @@ static av_cold int set_size_info(AVFilterContext *ctx,
     r->act_h = FFMIN(r->act_h, inlink->h - r->act_y);
 
     ff_scale_adjust_dimensions(inlink, &w, &h,
-                               r->force_original_aspect_ratio, r->force_divisible_by, 1.0f);
+                               r->force_original_aspect_ratio, r->force_divisible_by);
 
     if (((int64_t)h * inlink->w) > INT_MAX ||
         ((int64_t)w * inlink->h) > INT_MAX) {
@@ -346,18 +346,17 @@ static av_cold int rgavpp_config_props(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     RGAVppContext     *r = ctx->priv;
     AVFilterLink *inlink = ctx->inputs[0];
-    FilterLink      *inl = ff_filter_link(inlink);
     AVHWFramesContext *in_frames_ctx;
     enum AVPixelFormat in_format;
     enum AVPixelFormat out_format;
     RKRGAParam param = { NULL };
     int ret;
 
-    if (!inl->hw_frames_ctx) {
+    if (!inlink->hw_frames_ctx) {
         av_log(ctx, AV_LOG_ERROR, "No hw context provided on input\n");
         return AVERROR(EINVAL);
     }
-    in_frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
+    in_frames_ctx = (AVHWFramesContext *)inlink->hw_frames_ctx->data;
     in_format     = in_frames_ctx->sw_format;
     out_format    = (r->format == AV_PIX_FMT_NONE) ? in_format : r->format;
 
@@ -462,23 +461,23 @@ static av_cold void rgavpp_uninit(AVFilterContext *ctx)
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
 
 #define RKRGA_VPP_COMMON_OPTS \
-    { "force_yuv",    "Enforce planar YUV format output", OFFSET(force_yuv), AV_OPT_TYPE_INT, { .i64 = FORCE_YUV_DISABLE }, 0, FORCE_YUV_NB - 1, FLAGS, .unit = "force_yuv" }, \
-        { "disable",  NULL,                     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_DISABLE  }, 0, 0, FLAGS, .unit = "force_yuv" }, \
-        { "auto",     "Match in/out bit depth", 0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_AUTO     }, 0, 0, FLAGS, .unit = "force_yuv" }, \
-        { "8bit",     "8-bit",                  0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_8BIT     }, 0, 0, FLAGS, .unit = "force_yuv" }, \
-        { "10bit",    "10-bit uncompact/8-bit", 0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_10BIT    }, 0, 0, FLAGS, .unit = "force_yuv" }, \
-    { "force_chroma", "Enforce chroma of planar YUV format output", OFFSET(force_chroma), AV_OPT_TYPE_INT, { .i64 = FORCE_CHROMA_AUTO }, 0, FORCE_CHROMA_NB - 1, FLAGS, .unit = "force_chroma" }, \
-        { "auto",     "Match in/out chroma",    0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_AUTO  }, 0, 0, FLAGS, .unit = "force_chroma" }, \
-        { "420sp",    "4:2:0 semi-planar",      0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_420SP }, 0, 0, FLAGS, .unit = "force_chroma" }, \
-        { "420p",     "4:2:0 fully-planar",     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_420P  }, 0, 0, FLAGS, .unit = "force_chroma" }, \
-        { "422sp",    "4:2:2 semi-planar",      0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_422SP }, 0, 0, FLAGS, .unit = "force_chroma" }, \
-        { "422p",     "4:2:2 fully-planar",     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_422P  }, 0, 0, FLAGS, .unit = "force_chroma" }, \
-    { "core", "Set multicore RGA scheduler core [use with caution]", OFFSET(rga.scheduler_core), AV_OPT_TYPE_FLAGS, { .i64 = 0 }, 0, INT_MAX, FLAGS, .unit = "core" }, \
-        { "default",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, .unit = "core" }, \
-        { "rga3_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "core" }, /* RGA3_SCHEDULER_CORE0 */ \
-        { "rga3_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, .unit = "core" }, /* RGA3_SCHEDULER_CORE1 */ \
-        { "rga2_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 4 }, 0, 0, FLAGS, .unit = "core" }, /* RGA2_SCHEDULER_CORE0 */ \
-        { "rga2_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 8 }, 0, 0, FLAGS, .unit = "core" }, /* RGA2_SCHEDULER_CORE1 */ \
+    { "force_yuv",    "Enforce planar YUV format output", OFFSET(force_yuv), AV_OPT_TYPE_INT, { .i64 = FORCE_YUV_DISABLE }, 0, FORCE_YUV_NB - 1, FLAGS, "force_yuv" }, \
+        { "disable",  NULL,                     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_DISABLE  }, 0, 0, FLAGS, "force_yuv" }, \
+        { "auto",     "Match in/out bit depth", 0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_AUTO     }, 0, 0, FLAGS, "force_yuv" }, \
+        { "8bit",     "8-bit",                  0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_8BIT     }, 0, 0, FLAGS, "force_yuv" }, \
+        { "10bit",    "10-bit uncompact/8-bit", 0, AV_OPT_TYPE_CONST, { .i64 = FORCE_YUV_10BIT    }, 0, 0, FLAGS, "force_yuv" }, \
+    { "force_chroma", "Enforce chroma of planar YUV format output", OFFSET(force_chroma), AV_OPT_TYPE_INT, { .i64 = FORCE_CHROMA_AUTO }, 0, FORCE_CHROMA_NB - 1, FLAGS, "force_chroma" }, \
+        { "auto",     "Match in/out chroma",    0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_AUTO  }, 0, 0, FLAGS, "force_chroma" }, \
+        { "420sp",    "4:2:0 semi-planar",      0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_420SP }, 0, 0, FLAGS, "force_chroma" }, \
+        { "420p",     "4:2:0 fully-planar",     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_420P  }, 0, 0, FLAGS, "force_chroma" }, \
+        { "422sp",    "4:2:2 semi-planar",      0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_422SP }, 0, 0, FLAGS, "force_chroma" }, \
+        { "422p",     "4:2:2 fully-planar",     0, AV_OPT_TYPE_CONST, { .i64 = FORCE_CHROMA_422P  }, 0, 0, FLAGS, "force_chroma" }, \
+    { "core", "Set multicore RGA scheduler core [use with caution]", OFFSET(rga.scheduler_core), AV_OPT_TYPE_FLAGS, { .i64 = 0 }, 0, INT_MAX, FLAGS, "core" }, \
+        { "default",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, "core" }, \
+        { "rga3_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, "core" }, /* RGA3_SCHEDULER_CORE0 */ \
+        { "rga3_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, "core" }, /* RGA3_SCHEDULER_CORE1 */ \
+        { "rga2_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 4 }, 0, 0, FLAGS, "core" }, /* RGA2_SCHEDULER_CORE0 */ \
+        { "rga2_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 8 }, 0, 0, FLAGS, "core" }, /* RGA2_SCHEDULER_CORE1 */ \
     { "async_depth", "Set the internal parallelization depth", OFFSET(rga.async_depth), AV_OPT_TYPE_INT, { .i64 = 2 }, 0, 4, .flags = FLAGS }, \
     { "afbc", "Enable AFBC (Arm Frame Buffer Compression) to save bandwidth", OFFSET(rga.afbc_out), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, .flags = FLAGS },
 
@@ -503,10 +502,10 @@ static const AVOption rgascale_options[] = {
     { "w",  "Output video width",  OFFSET(ow), AV_OPT_TYPE_STRING, { .str = "iw" }, 0, 0, FLAGS },
     { "h",  "Output video height", OFFSET(oh), AV_OPT_TYPE_STRING, { .str = "ih" }, 0, 0, FLAGS },
     { "format", "Output video pixel format", OFFSET(format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, INT_MIN, INT_MAX, .flags = FLAGS },
-    { "force_original_aspect_ratio", "Decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 2, FLAGS, .unit = "force_oar" }, \
-        { "disable",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, .unit = "force_oar" }, \
-        { "decrease", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "force_oar" }, \
-        { "increase", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, .unit = "force_oar" }, \
+    { "force_original_aspect_ratio", "Decrease or increase w/h if necessary to keep the original AR", OFFSET(force_original_aspect_ratio), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 2, FLAGS, "force_oar" }, \
+        { "disable",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, "force_oar" }, \
+        { "decrease", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, "force_oar" }, \
+        { "increase", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, "force_oar" }, \
     { "force_divisible_by", "Enforce that the output resolution is divisible by a defined integer when force_original_aspect_ratio is used", OFFSET(force_divisible_by), AV_OPT_TYPE_INT, { .i64 = 2 }, 1, 256, FLAGS }, \
     RKRGA_VPP_COMMON_OPTS
     { NULL },
@@ -522,12 +521,11 @@ static av_cold int rgascale_preinit(AVFilterContext *ctx)
 
 AVFILTER_DEFINE_CLASS(rgascale);
 
-const FFFilter ff_vf_scale_rkrga = {
-    .p.name         = "scale_rkrga",
-    .p.description  = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video resizer and format converter"),
-    .p.priv_class   = &rgascale_class,
-    .p.flags        = AVFILTER_FLAG_HWDEVICE,
+const AVFilter ff_vf_scale_rkrga = {
+    .name           = "scale_rkrga",
+    .description    = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video resizer and format converter"),
     .priv_size      = sizeof(RGAVppContext),
+    .priv_class     = &rgascale_class,
     .preinit        = rgascale_preinit,
     .init           = rgavpp_init,
     .uninit         = rgavpp_uninit,
@@ -536,6 +534,7 @@ const FFFilter ff_vf_scale_rkrga = {
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_DRM_PRIME),
     .activate       = rgavpp_activate,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+    .flags          = AVFILTER_FLAG_HWDEVICE,
 };
 
 #endif
@@ -550,26 +549,25 @@ static const AVOption rgavpp_options[] = {
     { "cx", "Set the x crop area expression",      OFFSET(cx), AV_OPT_TYPE_STRING, { .str = "(in_w-out_w)/2" }, 0, 0, FLAGS },
     { "cy", "Set the y crop area expression",      OFFSET(cy), AV_OPT_TYPE_STRING, { .str = "(in_h-out_h)/2" }, 0, 0, FLAGS },
     { "format", "Output video pixel format", OFFSET(format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, INT_MIN, INT_MAX, .flags = FLAGS },
-    { "transpose", "Set transpose direction", OFFSET(transpose), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 6, FLAGS, .unit = "transpose" },
-        { "cclock_hflip", "Rotate counter-clockwise with horizontal flip", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK_FLIP }, 0, 0, FLAGS, .unit = "transpose" },
-        { "clock",        "Rotate clockwise",                              0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CLOCK       }, 0, 0, FLAGS, .unit = "transpose" },
-        { "cclock",       "Rotate counter-clockwise",                      0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK      }, 0, 0, FLAGS, .unit = "transpose" },
-        { "clock_hflip",  "Rotate clockwise with horizontal flip",         0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CLOCK_FLIP  }, 0, 0, FLAGS, .unit = "transpose" },
-        { "reversal",     "Rotate by half-turn",                           0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_REVERSAL    }, 0, 0, FLAGS, .unit = "transpose" },
-        { "hflip",        "Flip horizontally",                             0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_HFLIP       }, 0, 0, FLAGS, .unit = "transpose" },
-        { "vflip",        "Flip vertically",                               0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_VFLIP       }, 0, 0, FLAGS, .unit = "transpose" },
+    { "transpose", "Set transpose direction", OFFSET(transpose), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 6, FLAGS, "transpose" },
+        { "cclock_hflip", "Rotate counter-clockwise with horizontal flip", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK_FLIP }, 0, 0, FLAGS, "transpose" },
+        { "clock",        "Rotate clockwise",                              0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CLOCK       }, 0, 0, FLAGS, "transpose" },
+        { "cclock",       "Rotate counter-clockwise",                      0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK      }, 0, 0, FLAGS, "transpose" },
+        { "clock_hflip",  "Rotate clockwise with horizontal flip",         0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CLOCK_FLIP  }, 0, 0, FLAGS, "transpose" },
+        { "reversal",     "Rotate by half-turn",                           0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_REVERSAL    }, 0, 0, FLAGS, "transpose" },
+        { "hflip",        "Flip horizontally",                             0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_HFLIP       }, 0, 0, FLAGS, "transpose" },
+        { "vflip",        "Flip vertically",                               0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_VFLIP       }, 0, 0, FLAGS, "transpose" },
     RKRGA_VPP_COMMON_OPTS
     { NULL },
 };
 
 AVFILTER_DEFINE_CLASS(rgavpp);
 
-const FFFilter ff_vf_vpp_rkrga = {
-    .p.name         = "vpp_rkrga",
-    .p.description  = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video post-process (scale/crop/transpose)"),
-    .p.priv_class   = &rgavpp_class,
-    .p.flags        = AVFILTER_FLAG_HWDEVICE,
+const AVFilter ff_vf_vpp_rkrga = {
+    .name           = "vpp_rkrga",
+    .description    = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video post-process (scale/crop/transpose)"),
     .priv_size      = sizeof(RGAVppContext),
+    .priv_class     = &rgavpp_class,
     .init           = rgavpp_init,
     .uninit         = rgavpp_uninit,
     FILTER_INPUTS(rgavpp_inputs),
@@ -577,6 +575,7 @@ const FFFilter ff_vf_vpp_rkrga = {
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_DRM_PRIME),
     .activate       = rgavpp_activate,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+    .flags          = AVFILTER_FLAG_HWDEVICE,
 };
 
 #endif

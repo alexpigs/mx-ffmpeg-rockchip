@@ -165,8 +165,6 @@ static av_cold int rgaoverlay_config_props(AVFilterLink *outlink)
     RGAOverlayContext *r = ctx->priv;
     AVFilterLink *inlink_main    = ctx->inputs[0];
     AVFilterLink *inlink_overlay = ctx->inputs[1];
-    FilterLink   *inl_main       = ff_filter_link(inlink_main);
-    FilterLink   *inl_overlay    = ff_filter_link(inlink_overlay);
     AVHWFramesContext *frames_ctx_main;
     AVHWFramesContext *frames_ctx_overlay;
     enum AVPixelFormat in_format_main;
@@ -176,19 +174,19 @@ static av_cold int rgaoverlay_config_props(AVFilterLink *outlink)
 
     RKRGAParam param = { NULL };
 
-    if (!inl_main->hw_frames_ctx) {
+    if (!inlink_main->hw_frames_ctx) {
         av_log(ctx, AV_LOG_ERROR, "No hw context provided on main input\n");
         return AVERROR(EINVAL);
     }
-    frames_ctx_main = (AVHWFramesContext *)inl_main->hw_frames_ctx->data;
+    frames_ctx_main = (AVHWFramesContext *)inlink_main->hw_frames_ctx->data;
     in_format_main  = frames_ctx_main->sw_format;
     out_format      = (r->format == AV_PIX_FMT_NONE) ? in_format_main : r->format;
 
-    if (!inl_overlay->hw_frames_ctx) {
+    if (!inlink_overlay->hw_frames_ctx) {
         av_log(ctx, AV_LOG_ERROR, "No hw context provided on overlay input\n");
         return AVERROR(EINVAL);
     }
-    frames_ctx_overlay = (AVHWFramesContext *)inl_overlay->hw_frames_ctx->data;
+    frames_ctx_overlay = (AVHWFramesContext *)inlink_overlay->hw_frames_ctx->data;
     in_format_overlay  = frames_ctx_overlay->sw_format;
 
     ret = set_size_info(ctx, inlink_main, inlink_overlay, outlink);
@@ -316,24 +314,24 @@ static const AVOption rgaoverlay_options[] = {
     { "x", "Overlay x position", OFFSET(overlay_ox), AV_OPT_TYPE_STRING, { .str = "0" }, 0, 0, .flags = FLAGS },
     { "y", "Overlay y position", OFFSET(overlay_oy), AV_OPT_TYPE_STRING, { .str = "0" }, 0, 0, .flags = FLAGS },
     { "alpha", "Overlay global alpha", OFFSET(global_alpha), AV_OPT_TYPE_INT, { .i64 = 255 }, 0, 255, .flags = FLAGS },
-    { "alpha_format", "alpha format", OFFSET(alpha_format), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, FLAGS, .unit = "alpha_format" },
-        { "straight",      "The overlay input is unpremultiplied", 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, .flags = FLAGS, .unit = "alpha_format" },
-        { "premultiplied", "The overlay input is premultiplied",   0, AV_OPT_TYPE_CONST, { .i64 = 1 }, .flags = FLAGS, .unit = "alpha_format" },
+    { "alpha_format", "alpha format", OFFSET(alpha_format), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, FLAGS, "alpha_format" },
+        { "straight",      "The overlay input is unpremultiplied", 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, .flags = FLAGS, "alpha_format" },
+        { "premultiplied", "The overlay input is premultiplied",   0, AV_OPT_TYPE_CONST, { .i64 = 1 }, .flags = FLAGS, "alpha_format" },
     { "format", "Output video pixel format", OFFSET(format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, INT_MIN, INT_MAX, .flags = FLAGS },
     { "eof_action", "Action to take when encountering EOF from secondary input ",
         OFFSET(fs.opt_eof_action), AV_OPT_TYPE_INT, { .i64 = EOF_ACTION_REPEAT },
-        EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, .unit = "eof_action" },
-        { "repeat", "Repeat the previous frame.",   0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS, .unit = "eof_action" },
-        { "endall", "End both streams.",            0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS, .unit = "eof_action" },
-        { "pass",   "Pass through the main input.", 0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_PASS },   .flags = FLAGS, .unit = "eof_action" },
+        EOF_ACTION_REPEAT, EOF_ACTION_PASS, .flags = FLAGS, "eof_action" },
+        { "repeat", "Repeat the previous frame.",   0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_REPEAT }, .flags = FLAGS, "eof_action" },
+        { "endall", "End both streams.",            0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_ENDALL }, .flags = FLAGS, "eof_action" },
+        { "pass",   "Pass through the main input.", 0, AV_OPT_TYPE_CONST, { .i64 = EOF_ACTION_PASS },   .flags = FLAGS, "eof_action" },
     { "shortest", "Force termination when the shortest input terminates", OFFSET(fs.opt_shortest), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, FLAGS },
     { "repeatlast", "Repeat overlay of the last overlay frame", OFFSET(fs.opt_repeatlast), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, FLAGS },
-    { "core", "Set multicore RGA scheduler core [use with caution]", OFFSET(rga.scheduler_core), AV_OPT_TYPE_FLAGS, { .i64 = 0 }, 0, INT_MAX, FLAGS, .unit = "core" },
-        { "default",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, .unit = "core" },
-        { "rga3_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "core" }, /* RGA3_SCHEDULER_CORE0 */
-        { "rga3_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, .unit = "core" }, /* RGA3_SCHEDULER_CORE1 */
-        { "rga2_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 4 }, 0, 0, FLAGS, .unit = "core" }, /* RGA2_SCHEDULER_CORE0 */
-        { "rga2_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 8 }, 0, 0, FLAGS, .unit = "core" }, /* RGA2_SCHEDULER_CORE1 */
+    { "core", "Set multicore RGA scheduler core [use with caution]", OFFSET(rga.scheduler_core), AV_OPT_TYPE_FLAGS, { .i64 = 0 }, 0, INT_MAX, FLAGS, "core" },
+        { "default",    NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, FLAGS, "core" },
+        { "rga3_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, "core" }, /* RGA3_SCHEDULER_CORE0 */
+        { "rga3_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, "core" }, /* RGA3_SCHEDULER_CORE1 */
+        { "rga2_core0", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 4 }, 0, 0, FLAGS, "core" }, /* RGA2_SCHEDULER_CORE0 */
+        { "rga2_core1", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 8 }, 0, 0, FLAGS, "core" }, /* RGA2_SCHEDULER_CORE1 */
     { "async_depth", "Set the internal parallelization depth", OFFSET(rga.async_depth), AV_OPT_TYPE_INT, { .i64 = 2 }, 0, 4, .flags = FLAGS },
     { "afbc", "Enable AFBC (Arm Frame Buffer Compression) to save bandwidth", OFFSET(rga.afbc_out), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, .flags = FLAGS },
     { NULL },
@@ -360,12 +358,11 @@ static const AVFilterPad rgaoverlay_outputs[] = {
     },
 };
 
-const FFFilter ff_vf_overlay_rkrga = {
-    .p.name         = "overlay_rkrga",
-    .p.description  = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video compositor"),
-    .p.priv_class   = &rgaoverlay_class,
-    .p.flags        = AVFILTER_FLAG_HWDEVICE,
+const AVFilter ff_vf_overlay_rkrga = {
+    .name           = "overlay_rkrga",
+    .description    = NULL_IF_CONFIG_SMALL("Rockchip RGA (2D Raster Graphic Acceleration) video compositor"),
     .priv_size      = sizeof(RGAOverlayContext),
+    .priv_class     = &rgaoverlay_class,
     .init           = rgaoverlay_init,
     .uninit         = rgaoverlay_uninit,
     .activate       = rgaoverlay_activate,
@@ -374,4 +371,5 @@ const FFFilter ff_vf_overlay_rkrga = {
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_DRM_PRIME),
     .preinit        = rgaoverlay_framesync_preinit,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+    .flags          = AVFILTER_FLAG_HWDEVICE,
 };

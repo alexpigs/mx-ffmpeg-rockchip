@@ -36,7 +36,6 @@
 #include "packet_internal.h"
 
 #include "libavutil/hwcontext_rkmpp.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/uuid.h"
@@ -55,7 +54,7 @@ typedef struct MPPEncFrame {
 } MPPEncFrame;
 
 typedef struct RKMPPEncContext {
-    AVClass           *class;
+    const AVClass     *class;
 
     MppApi            *mapi;
     MppCtx             mctx;
@@ -103,11 +102,11 @@ static const AVRational mpp_tb = { 1, 1000000 };
 
 #define RKMPP_ENC_COMMON_OPTS \
     { "rc_mode", "Set the encoding rate control mode", OFFSET(rc_mode), AV_OPT_TYPE_INT, \
-            { .i64 = MPP_ENC_RC_MODE_BUTT }, MPP_ENC_RC_MODE_VBR, MPP_ENC_RC_MODE_BUTT, VE, .unit = "rc_mode"}, \
-        { "VBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_VBR }, 0, 0, VE, .unit = "rc_mode" }, \
-        { "CBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_CBR }, 0, 0, VE, .unit = "rc_mode" }, \
-        { "CQP", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_FIXQP }, 0, 0, VE, .unit = "rc_mode" }, \
-        { "AVBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_AVBR }, 0, 0, VE, .unit = "rc_mode" }, \
+            { .i64 = MPP_ENC_RC_MODE_BUTT }, MPP_ENC_RC_MODE_VBR, MPP_ENC_RC_MODE_BUTT, VE, "rc_mode"}, \
+        { "VBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_VBR }, 0, 0, VE, "rc_mode" }, \
+        { "CBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_CBR }, 0, 0, VE, "rc_mode" }, \
+        { "CQP", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_FIXQP }, 0, 0, VE, "rc_mode" }, \
+        { "AVBR", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_ENC_RC_MODE_AVBR }, 0, 0, VE, "rc_mode" }, \
     { "qp_init", "Set the initial QP value", OFFSET(qp_init), AV_OPT_TYPE_INT, \
             { .i64 = -1 }, -1, 51, VE, "qmin" }, \
     { "qp_max", "Set the max QP value for P and B frame", OFFSET(qp_max), AV_OPT_TYPE_INT, \
@@ -130,35 +129,35 @@ static const AVRational mpp_tb = { 1, 1000000 };
 static const AVOption h264_options[] = {
     RKMPP_ENC_COMMON_OPTS
     { "profile", "Set the encoding profile restriction", OFFSET(profile), AV_OPT_TYPE_INT,
-            { .i64 = AV_PROFILE_H264_HIGH }, -1, AV_PROFILE_H264_HIGH, VE, .unit = "profile" },
-        { "baseline",   NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_BASELINE }, INT_MIN, INT_MAX, VE, .unit = "profile" },
-        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_MAIN },     INT_MIN, INT_MAX, VE, .unit = "profile" },
-        { "high",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_HIGH },     INT_MIN, INT_MAX, VE, .unit = "profile" },
+            { .i64 = AV_PROFILE_H264_HIGH }, -1, AV_PROFILE_H264_HIGH, VE, "profile" },
+        { "baseline",   NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_BASELINE }, INT_MIN, INT_MAX, VE, "profile" },
+        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_MAIN },     INT_MIN, INT_MAX, VE, "profile" },
+        { "high",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_H264_HIGH },     INT_MIN, INT_MAX, VE, "profile" },
     { "level", "Set the encoding level restriction", OFFSET(level), AV_OPT_TYPE_INT,
-            { .i64 = 0 }, AV_LEVEL_UNKNOWN, 62, VE, .unit = "level" },
-        { "1",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 10 }, 0, 0, VE, .unit = "level" },
-        { "1.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 11 }, 0, 0, VE, .unit = "level" },
-        { "1.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 12 }, 0, 0, VE, .unit = "level" },
-        { "1.3",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 13 }, 0, 0, VE, .unit = "level" },
-        { "2",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 20 }, 0, 0, VE, .unit = "level" },
-        { "2.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 21 }, 0, 0, VE, .unit = "level" },
-        { "2.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 22 }, 0, 0, VE, .unit = "level" },
-        { "3",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 30 }, 0, 0, VE, .unit = "level" },
-        { "3.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 31 }, 0, 0, VE, .unit = "level" },
-        { "3.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 32 }, 0, 0, VE, .unit = "level" },
-        { "4",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 40 }, 0, 0, VE, .unit = "level" },
-        { "4.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 41 }, 0, 0, VE, .unit = "level" },
-        { "4.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 42 }, 0, 0, VE, .unit = "level" },
-        { "5",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 50 }, 0, 0, VE, .unit = "level" },
-        { "5.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 51 }, 0, 0, VE, .unit = "level" },
-        { "5.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 52 }, 0, 0, VE, .unit = "level" },
-        { "6",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 60 }, 0, 0, VE, .unit = "level" },
-        { "6.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 61 }, 0, 0, VE, .unit = "level" },
-        { "6.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 62 }, 0, 0, VE, .unit = "level" },
+            { .i64 = 0 }, FF_LEVEL_UNKNOWN, 62, VE, "level" },
+        { "1",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 10 }, 0, 0, VE, "level" },
+        { "1.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 11 }, 0, 0, VE, "level" },
+        { "1.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 12 }, 0, 0, VE, "level" },
+        { "1.3",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 13 }, 0, 0, VE, "level" },
+        { "2",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 20 }, 0, 0, VE, "level" },
+        { "2.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 21 }, 0, 0, VE, "level" },
+        { "2.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 22 }, 0, 0, VE, "level" },
+        { "3",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 30 }, 0, 0, VE, "level" },
+        { "3.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 31 }, 0, 0, VE, "level" },
+        { "3.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 32 }, 0, 0, VE, "level" },
+        { "4",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 40 }, 0, 0, VE, "level" },
+        { "4.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 41 }, 0, 0, VE, "level" },
+        { "4.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 42 }, 0, 0, VE, "level" },
+        { "5",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 50 }, 0, 0, VE, "level" },
+        { "5.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 51 }, 0, 0, VE, "level" },
+        { "5.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 52 }, 0, 0, VE, "level" },
+        { "6",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 60 }, 0, 0, VE, "level" },
+        { "6.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 61 }, 0, 0, VE, "level" },
+        { "6.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 62 }, 0, 0, VE, "level" },
     { "coder", "Set the entropy coder type (from 0 to 1) (default cabac)", OFFSET(coder), AV_OPT_TYPE_INT,
-            { .i64 = 1 }, 0, 1, VE, .unit = "coder" },
-        { "cavlc", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, INT_MIN, INT_MAX, VE, .unit = "coder" },
-        { "cabac", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, .unit = "coder" },
+            { .i64 = 1 }, 0, 1, VE, "coder" },
+        { "cavlc", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, INT_MIN, INT_MAX, VE, "coder" },
+        { "cabac", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "coder" },
     { "8x8dct", "Set the high profile 8x8 transform", OFFSET(dct8x8), AV_OPT_TYPE_BOOL,
             { .i64 = 1 }, 0, 1, VE, "8x8dct" },
     { "udu_sei", "Pass on user data unregistered SEI if available", OFFSET(udu_sei), AV_OPT_TYPE_BOOL,
@@ -171,27 +170,27 @@ static const AVOption h264_options[] = {
 static const AVOption hevc_options[] = {
     RKMPP_ENC_COMMON_OPTS
     { "profile", "Set the encoding profile restriction", OFFSET(profile), AV_OPT_TYPE_INT,
-            { .i64 = AV_PROFILE_HEVC_MAIN }, -1, AV_PROFILE_HEVC_MAIN, VE, .unit = "profile" },
-        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_MAIN }, INT_MIN, INT_MAX, VE, .unit = "profile" },
+            { .i64 = AV_PROFILE_HEVC_MAIN }, -1, AV_PROFILE_HEVC_MAIN, VE, "profile" },
+        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_PROFILE_HEVC_MAIN }, INT_MIN, INT_MAX, VE, "profile" },
     { "tier", "Set the encoding profile tier restriction", OFFSET(tier), AV_OPT_TYPE_INT,
-            { .i64 = 1 }, 0, 1, VE, .unit = "tier" },
-        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, INT_MIN, INT_MAX, VE, .unit = "tier" },
-        { "high",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, .unit = "tier" },
+            { .i64 = 1 }, 0, 1, VE, "tier" },
+        { "main",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, INT_MIN, INT_MAX, VE, "tier" },
+        { "high",       NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "tier" },
     { "level", "Set the encoding level restriction", OFFSET(level), AV_OPT_TYPE_INT,
-            { .i64 = 0 }, AV_LEVEL_UNKNOWN, 186, VE, .unit = "level" },
-        { "1",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 30 }, 0, 0, VE, .unit = "level" },
-        { "2",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 60 }, 0, 0, VE, .unit = "level" },
-        { "2.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 63 }, 0, 0, VE, .unit = "level" },
-        { "3",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 90 }, 0, 0, VE, .unit = "level" },
-        { "3.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 93 }, 0, 0, VE, .unit = "level" },
-        { "4",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 120 }, 0, 0, VE, .unit = "level" },
-        { "4.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 123 }, 0, 0, VE, .unit = "level" },
-        { "5",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 150 }, 0, 0, VE, .unit = "level" },
-        { "5.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 153 }, 0, 0, VE, .unit = "level" },
-        { "5.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 156 }, 0, 0, VE, .unit = "level" },
-        { "6",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 180 }, 0, 0, VE, .unit = "level" },
-        { "6.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 183 }, 0, 0, VE, .unit = "level" },
-        { "6.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 186 }, 0, 0, VE, .unit = "level" },
+            { .i64 = 0 }, FF_LEVEL_UNKNOWN, 186, VE, "level" },
+        { "1",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 30 }, 0, 0, VE, "level" },
+        { "2",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 60 }, 0, 0, VE, "level" },
+        { "2.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 63 }, 0, 0, VE, "level" },
+        { "3",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 90 }, 0, 0, VE, "level" },
+        { "3.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 93 }, 0, 0, VE, "level" },
+        { "4",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 120 }, 0, 0, VE, "level" },
+        { "4.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 123 }, 0, 0, VE, "level" },
+        { "5",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 150 }, 0, 0, VE, "level" },
+        { "5.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 153 }, 0, 0, VE, "level" },
+        { "5.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 156 }, 0, 0, VE, "level" },
+        { "6",          NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 180 }, 0, 0, VE, "level" },
+        { "6.1",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 183 }, 0, 0, VE, "level" },
+        { "6.2",        NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 186 }, 0, 0, VE, "level" },
     { "udu_sei", "Pass on user data unregistered SEI if available", OFFSET(udu_sei), AV_OPT_TYPE_BOOL,
             { .i64 = 0 }, 0, 1, VE, "udu_sei" },
     { NULL },
@@ -205,12 +204,12 @@ static const AVOption mjpeg_options[] = {
     { "qp_min", "Set the min QP/Q_Factor value", OFFSET(qp_min), AV_OPT_TYPE_INT, \
             { .i64 = -1 }, -1, 99, VE, "qp_min" }, \
     { "chroma_fmt", "Specify the output chroma format for down subsampling", OFFSET(chroma_fmt), AV_OPT_TYPE_INT, \
-            { .i64 = MPP_CHROMA_UNSPECIFIED }, -1, MPP_CHROMA_444, VE, .unit = "chroma_fmt" }, \
-        { "auto", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, 0, 0, VE, .unit = "chroma_fmt" },
-        { "400",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_400 }, 0, 0, VE, .unit = "chroma_fmt" },
-        { "420",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_420 }, 0, 0, VE, .unit = "chroma_fmt" },
-        { "422",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_422 }, 0, 0, VE, .unit = "chroma_fmt" },
-        { "444",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_444 }, 0, 0, VE, .unit = "chroma_fmt" },
+            { .i64 = MPP_CHROMA_UNSPECIFIED }, -1, MPP_CHROMA_444, VE, "chroma_fmt" }, \
+        { "auto", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, 0, 0, VE, "chroma_fmt" },
+        { "400",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_400 }, 0, 0, VE, "chroma_fmt" },
+        { "420",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_420 }, 0, 0, VE, "chroma_fmt" },
+        { "422",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_422 }, 0, 0, VE, "chroma_fmt" },
+        { "444",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = MPP_CHROMA_444 }, 0, 0, VE, "chroma_fmt" },
     { NULL },
 };
 
@@ -312,8 +311,7 @@ const FFCodec ff_##x##_rkmpp_encoder = { \
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_HARDWARE, \
     .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE | \
                       FF_CODEC_CAP_INIT_CLEANUP, \
-    CODEC_PIXFMTS_ARRAY(rkmpp_enc_pix_fmts_##xx), \
-    .color_ranges   = AVCOL_RANGE_MPEG | AVCOL_RANGE_JPEG, \
+    .p.pix_fmts     = rkmpp_enc_pix_fmts_##xx, \
     .hw_configs     = rkmpp_enc_hw_configs, \
     .defaults       = rkmpp_enc_defaults, \
     .p.wrapper_name = "rkmpp", \
