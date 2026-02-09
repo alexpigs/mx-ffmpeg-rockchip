@@ -832,13 +832,13 @@ static int v4l2_set_parameters(AVFormatContext *ctx)
                 tpf->denominator = framerate_num_dst;
             }
             av_log(ctx, AV_LOG_WARNING, "ioctl(VIDIOC_G_PARM): %s, estimated framerate %d/%d from dv timings.\n",
-                av_err2str(ret), tpf->denominator, tpf->numerator);
+                   av_err2str(ret), tpf->denominator, tpf->numerator);
         } else if (framerate_q.num && framerate_q.den) {
             // use user defined framerate for further error cases.
             tpf->numerator   = framerate_q.num;
             tpf->denominator = framerate_q.den;
             av_log(ctx, AV_LOG_WARNING, "ioctl(VIDIOC_G_PARM): %s, using framerate %d/%d\n",
-                av_err2str(ret), framerate_q.num, framerate_q.den);
+                   av_err2str(ret), framerate_q.num, framerate_q.den);
         } else {
             av_log(ctx, AV_LOG_WARNING, "ioctl(VIDIOC_G_PARM): %s\n", av_err2str(ret));
         }

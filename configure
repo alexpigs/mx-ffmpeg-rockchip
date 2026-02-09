@@ -3216,6 +3216,13 @@ av1_mediacodec_decoder_deps="mediacodec"
 av1_mediacodec_encoder_deps="mediacodec"
 av1_nvenc_encoder_deps="nvenc NV_ENC_PIC_PARAMS_AV1"
 av1_nvenc_encoder_select="atsc_a53"
+av1_qsv_decoder_select="qsvdec"
+av1_qsv_encoder_deps="libvpl"
+av1_qsv_encoder_select="qsvenc"
+av1_vaapi_encoder_deps="VAEncPictureParameterBufferAV1"
+av1_vaapi_encoder_select="cbs_av1 vaapi_encode"
+av1_vulkan_encoder_deps="vulkan_1_4"
+av1_vulkan_encoder_select="cbs_av1 vulkan_encode"
 av1_rkmpp_decoder_deps="rkmpp"
 h263_v4l2m2m_decoder_deps="v4l2_m2m h263_v4l2_m2m"
 h263_v4l2m2m_encoder_deps="v4l2_m2m h263_v4l2_m2m"
@@ -3270,11 +3277,11 @@ mjpeg_rkmpp_decoder_deps="rkmpp"
 mjpeg_rkmpp_encoder_deps="rkmpp"
 mjpeg_vaapi_encoder_deps="VAEncPictureParameterBufferJPEG"
 mjpeg_vaapi_encoder_select="cbs_jpeg jpegtables vaapi_encode"
+mjpeg_rkmpp_decoder_deps="rkmpp"
 mp3_mf_encoder_deps="mediafoundation"
 mpeg1_cuvid_decoder_deps="cuvid"
 mpeg1_v4l2m2m_decoder_deps="v4l2_m2m mpeg1_v4l2_m2m"
 mpeg1_rkmpp_decoder_deps="rkmpp"
-mpeg2_crystalhd_decoder_select="crystalhd"
 mpeg2_cuvid_decoder_deps="cuvid"
 mpeg2_mmal_decoder_deps="mmal"
 mpeg2_mediacodec_decoder_deps="mediacodec"
@@ -3283,7 +3290,6 @@ mpeg2_qsv_encoder_select="qsvenc"
 mpeg2_vaapi_encoder_select="cbs_mpeg2 vaapi_encode"
 mpeg2_v4l2m2m_decoder_deps="v4l2_m2m mpeg2_v4l2_m2m"
 mpeg2_rkmpp_decoder_deps="rkmpp"
-mpeg4_crystalhd_decoder_select="crystalhd"
 mpeg4_cuvid_decoder_deps="cuvid"
 mpeg4_mediacodec_decoder_deps="mediacodec"
 mpeg4_mediacodec_encoder_deps="mediacodec"
@@ -3293,8 +3299,6 @@ mpeg4_v4l2m2m_decoder_deps="v4l2_m2m mpeg4_v4l2_m2m"
 mpeg4_v4l2m2m_encoder_deps="v4l2_m2m mpeg4_v4l2_m2m"
 mpeg4_rkmpp_decoder_deps="rkmpp"
 mpeg4_rkmpp_decoder_select="mpeg4_unpack_bframes_bsf dump_extradata_bsf"
-msmpeg4_crystalhd_decoder_select="crystalhd"
-vc1_crystalhd_decoder_select="crystalhd"
 vc1_cuvid_decoder_deps="cuvid"
 vc1_mmal_decoder_deps="mmal"
 vc1_qsv_decoder_select="qsvdec"
@@ -3892,7 +3896,7 @@ cws2fws_extralibs="zlib_extralibs"
 
 # libraries, in any order
 avcodec_deps="avutil"
-avcodec_suggest="libm stdatomic rkrga"
+avcodec_suggest="libm stdatomic spirv_compiler rkrga"
 avdevice_deps="avformat avcodec avutil"
 avdevice_suggest="libm stdatomic"
 avfilter_deps="avutil"
@@ -3900,8 +3904,6 @@ avfilter_suggest="libm stdatomic"
 avformat_deps="avcodec avutil"
 avformat_suggest="libm network zlib stdatomic"
 avutil_suggest="clock_gettime ffnvcodec gcrypt libm libdrm libmfx opencl openssl rkmpp user32 vaapi vulkan videotoolbox corefoundation corevideo coremedia bcrypt stdatomic"
-postproc_deps="avutil gpl"
-postproc_suggest="libm stdatomic"
 swresample_deps="avutil"
 swresample_suggest="libm libsoxr stdatomic"
 swscale_deps="avutil"
@@ -6929,7 +6931,15 @@ enabled rkrga             && { require_pkg_config rkrga librga rga/RgaApi.h c_Rk
                                { enabled rkmpp ||
                                  die "ERROR: rkrga requires --enable-rkmpp"; }
                              }
-enabled vapoursynth       && require_pkg_config vapoursynth "vapoursynth-script >= 42" VSScript.h vsscript_init
+enabled vapoursynth       && require_headers "vapoursynth/VSScript4.h vapoursynth/VapourSynth4.h"
+
+enabled openssl            && {
+    enabled whip_muxer && {
+        $pkg_config --exists --print-errors "openssl >= 1.0.1k" ||
+        require_pkg_config openssl "openssl >= 1.0.1k" openssl/ssl.h SSL_library_init ||
+        require_pkg_config openssl "openssl >= 1.0.1k" openssl/ssl.h OPENSSL_init_ssl
+    }
+}
 
 
 if enabled gcrypt; then

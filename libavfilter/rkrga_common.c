@@ -24,9 +24,10 @@
  */
 
 #include "libavutil/common.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 
-#include "internal.h"
+#include "filters.h"
 #include "video.h"
 
 #include "rkrga_common.h"
@@ -546,6 +547,7 @@ static RGAFrame *submit_frame(RKRGAContext *r, AVFilterLink *inlink,
 static RGAFrame *query_frame(RKRGAContext *r, AVFilterLink *outlink,
                              const AVFrame *in, const AVFrame *picref_pat, int pat_preproc)
 {
+    FilterLink     *outl = ff_filter_link(outlink);
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *inlink = ctx->inputs[0];
     RGAFrame        *out_frame;
@@ -553,7 +555,7 @@ static RGAFrame *query_frame(RKRGAContext *r, AVFilterLink *outlink,
     RGAFrameInfo *in0_info = &r->in_rga_frame_infos[0];
     RGAFrameInfo *in1_info = ctx->nb_inputs > 1 ? &r->in_rga_frame_infos[1] : NULL;
     RGAFrameInfo *out_info = pat_preproc ? in1_info : &r->out_rga_frame_info;
-    AVBufferRef *hw_frame_ctx = pat_preproc ? r->pat_preproc_hwframes_ctx : outlink->hw_frames_ctx;
+    AVBufferRef *hw_frame_ctx = pat_preproc ? r->pat_preproc_hwframes_ctx : outl->hw_frames_ctx;
     int w_stride = 0, h_stride = 0;
     AVDRMFrameDescriptor *desc;
     AVDRMLayerDescriptor *layer;
@@ -725,6 +727,8 @@ static av_cold int init_hwframes_ctx(AVFilterContext *avctx)
     RKRGAContext      *r       = avctx->priv;
     AVFilterLink      *inlink  = avctx->inputs[0];
     AVFilterLink      *outlink = avctx->outputs[0];
+    FilterLink        *inl     = ff_filter_link(inlink);
+    FilterLink        *outl    = ff_filter_link(outlink);
     AVHWFramesContext *hwfc_in;
     AVHWFramesContext *hwfc_out;
     AVBufferRef       *hwfc_out_ref;
@@ -733,10 +737,10 @@ static av_cold int init_hwframes_ctx(AVFilterContext *avctx)
     AVRKMPPFramesContext *rkmpp_fc;
     int                ret;
 
-    if (!inlink->hw_frames_ctx)
+    if (!inl->hw_frames_ctx)
         return AVERROR(EINVAL);
 
-    hwfc_in = (AVHWFramesContext *)inlink->hw_frames_ctx->data;
+    hwfc_in = (AVHWFramesContext *)inl->hw_frames_ctx->data;
     device_ref = hwfc_in->device_ref;
     device_ctx = (AVHWDeviceContext *)device_ref->data;
 
@@ -771,17 +775,19 @@ static av_cold int init_hwframes_ctx(AVFilterContext *avctx)
         return ret;
     }
 
-    av_buffer_unref(&outlink->hw_frames_ctx);
-    outlink->hw_frames_ctx = hwfc_out_ref;
+    av_buffer_unref(&outl->hw_frames_ctx);
+    outl->hw_frames_ctx = hwfc_out_ref;
 
     return 0;
 }
 
 static av_cold int init_pat_preproc_hwframes_ctx(AVFilterContext *avctx)
 {
-    RKRGAContext      *r = avctx->priv;
+    RKRGAContext      *r       = avctx->priv;
     AVFilterLink      *inlink0 = avctx->inputs[0];
     AVFilterLink      *inlink1 = avctx->inputs[1];
+    FilterLink        *inl0    = ff_filter_link(inlink0);
+    FilterLink        *inl1    = ff_filter_link(inlink1);
     AVHWFramesContext *hwfc_in0, *hwfc_in1;
     AVHWFramesContext *hwfc_pat;
     AVBufferRef       *hwfc_pat_ref;
@@ -789,11 +795,11 @@ static av_cold int init_pat_preproc_hwframes_ctx(AVFilterContext *avctx)
     AVBufferRef       *device_ref0;
     int                ret;
 
-    if (!inlink0->hw_frames_ctx || !inlink1->hw_frames_ctx)
+    if (!inl0->hw_frames_ctx || !inl1->hw_frames_ctx)
         return AVERROR(EINVAL);
 
-    hwfc_in0 = (AVHWFramesContext *)inlink0->hw_frames_ctx->data;
-    hwfc_in1 = (AVHWFramesContext *)inlink1->hw_frames_ctx->data;
+    hwfc_in0 = (AVHWFramesContext *)inl0->hw_frames_ctx->data;
+    hwfc_in1 = (AVHWFramesContext *)inl1->hw_frames_ctx->data;
     device_ref0 = hwfc_in0->device_ref;
     device_ctx0 = (AVHWDeviceContext *)device_ref0->data;
 
@@ -1033,13 +1039,14 @@ static av_cold int fill_rga_frame_info_by_link(AVFilterContext *avctx,
                                                AVFilterLink *link,
                                                int nb_link, int is_inlink)
 {
+    FilterLink *l = ff_filter_link(link);
     AVHWFramesContext *hwfc;
     RKRGAContext *r = avctx->priv;
 
-    if (!link->hw_frames_ctx || link->format != AV_PIX_FMT_DRM_PRIME)
+    if (!l->hw_frames_ctx || link->format != AV_PIX_FMT_DRM_PRIME)
         return AVERROR(EINVAL);
 
-    hwfc = (AVHWFramesContext *)link->hw_frames_ctx->data;
+    hwfc = (AVHWFramesContext *)l->hw_frames_ctx->data;
 
     if (!map_av_to_rga_format(hwfc->sw_format, &info->rga_fmt, (is_inlink && nb_link > 0))) {
         av_log(avctx, AV_LOG_ERROR, "Unsupported '%s' pad %d format: '%s'\n",

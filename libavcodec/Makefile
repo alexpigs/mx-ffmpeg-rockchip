@@ -256,6 +256,8 @@ OBJS-$(CONFIG_AV1_MEDIACODEC_ENCODER)  += mediacodecenc.o
 OBJS-$(CONFIG_AV1_NVENC_ENCODER)       += nvenc_av1.o nvenc.o
 OBJS-$(CONFIG_AV1_QSV_ENCODER)         += qsvenc_av1.o
 OBJS-$(CONFIG_AV1_VAAPI_ENCODER)       += vaapi_encode_av1.o av1_levels.o
+OBJS-$(CONFIG_AV1_VULKAN_ENCODER)      += vulkan_encode.o vulkan_encode_av1.o \
+                                          hw_base_encode.o av1_levels.o
 OBJS-$(CONFIG_AV1_RKMPP_DECODER)       += rkmppdec.o
 OBJS-$(CONFIG_AVRN_DECODER)            += avrndec.o
 OBJS-$(CONFIG_AVRP_DECODER)            += r210dec.o
@@ -505,6 +507,8 @@ OBJS-$(CONFIG_MJPEG_QSV_ENCODER)       += qsvenc_jpeg.o
 OBJS-$(CONFIG_MJPEG_RKMPP_DECODER)     += rkmppdec.o
 OBJS-$(CONFIG_MJPEG_RKMPP_ENCODER)     += rkmppenc.o
 OBJS-$(CONFIG_MJPEG_VAAPI_ENCODER)     += vaapi_encode_mjpeg.o
+OBJS-$(CONFIG_MJPEG_RKMPP_DECODER)     += rkmppdec.o
+OBJS-$(CONFIG_MJPEG_RKMPP_ENCODER)     += rkmppenc.o
 OBJS-$(CONFIG_MLP_DECODER)             += mlpdec.o mlpdsp.o
 OBJS-$(CONFIG_MLP_ENCODER)             += mlpenc.o mlp.o
 OBJS-$(CONFIG_MMVIDEO_DECODER)         += mmvideo.o
