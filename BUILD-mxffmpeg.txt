@@ -1,3 +1,65 @@
+You are free to refer to any FFmpeg compilation tutorial targeting Linux ARM/ARM64. The official tutorial is always recommended. https://trac.ffmpeg.org/wiki/CompilationGuide#Linux
+
+The FFmpeg ./configure ... parameters are determined by personal needs. However, the following parameters MUST be additionally added to enable all functions of this project. --enable-gpl is recommended but not required, it can be removed and use LGPL v3.
+
+--enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
+Attention
+Make sure you have built and installed the latest MPP runtime and headers. Otherwise undefined behavior may occur, such as segmentation fault. Be careful if you use MPP deb packages from a vendor/BSP image, these packages are likely to be out of date.
+
+Examples
+Assumed that all the essential libs and toolchains are installed, such as git,meson,cmake,pkg-config,gcc,libdrm-dev,etc...
+
+# Native compilation on ARM/ARM64 host
+
+# Build MPP
+mkdir -p ~/dev && cd ~/dev
+git clone -b jellyfin-mpp --depth=1 https://gitee.com/nyanmisaka/mpp.git rkmpp
+pushd rkmpp
+mkdir rkmpp_build
+pushd rkmpp_build
+cmake \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON \
+    -DBUILD_TEST=OFF \
+    ..
+make -j $(nproc)
+make install
+
+
+# Build RGA
+mkdir -p ~/dev && cd ~/dev
+git clone -b jellyfin-rga --depth=1 https://gitee.com/nyanmisaka/rga.git rkrga
+meson setup rkrga rkrga_build \
+    --prefix=/usr \
+    --libdir=lib \
+    --buildtype=release \
+    --default-library=shared \
+    -Dcpp_args=-fpermissive \
+    -Dlibdrm=false \
+    -Dlibrga_demo=false
+meson configure rkrga_build
+ninja -C rkrga_build install
+
+
+# Build the minimal FFmpeg (You can customize the configure and install prefix)
+mkdir -p ~/dev && cd ~/dev
+git clone --depth=1 https://github.com/nyanmisaka/ffmpeg-rockchip.git ffmpeg
+cd ffmpeg
+./configure --prefix=/usr --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
+make -j $(nproc)
+
+# Try the compiled FFmpeg without installation
+./ffmpeg -decoders | grep rkmpp
+./ffmpeg -encoders | grep rkmpp
+./ffmpeg -filters | grep rkrga
+
+# Install FFmpeg to the prefix path
+make install
+
+
+
+
 
 debug
 ./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo

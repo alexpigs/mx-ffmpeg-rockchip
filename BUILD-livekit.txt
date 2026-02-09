@@ -1,0 +1,37 @@
+要设置翻墙
+git config --global http.proxy http://xxx
+git config --global https.proxy http://xxx
+
+1、安装开发工具链：
+sudo apt update && sudo apt install -y \
+    build-essential cmake ninja-build pkg-config \
+    llvm-dev libclang-dev clang \
+    libprotobuf-dev protobuf-compiler libabsl-dev \
+    libssl-dev libva-dev libdrm-dev libgbm-dev libx11-dev libgl1-mesa-dev libasound2-dev libpulse-dev libudev-dev \
+    gcc g++ libglib2.0-dev libgirepository1.0-dev
+
+2、## 安装rustup（若未安装）
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustup update stable
+rustc --version
+cargo --version
+# 升级rustup到最新版本
+rustup self update
+rustup update stable
+rustc --version  # 示例输出：rustc 1.79.0 (129f3b996 2024-06-10)
+cargo --version # 示例输出：cargo 1.79.0 (ffa9cf99a 2024-06-03)
+
+3、## rustup 安装的 cargo 路径
+which cargo
+~/.cargo/bin/cargo --version
+sudo mv /usr/bin/cargo /usr/bin/cargo.old
+sudo ln -s ~/.cargo/bin/cargo /usr/bin/cargo
+cargo --version  # 应输出1.93.0
+
+4、修改源码：
+编译过程中如果提示Network错误，只要修改port_interface.h中的类申明：
+   find ./ -name "port_interface.h" 找到文件，手动vi修改
+    virtual const Network* Network() const = 0;
+    为:
+    virtual const class webrtc::Network* Network() const = 0;
