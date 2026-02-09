@@ -1,0 +1,116 @@
+You are free to refer to any FFmpeg compilation tutorial targeting Linux ARM/ARM64. The official tutorial is always recommended. https://trac.ffmpeg.org/wiki/CompilationGuide#Linux
+
+The FFmpeg ./configure ... parameters are determined by personal needs. However, the following parameters MUST be additionally added to enable all functions of this project. --enable-gpl is recommended but not required, it can be removed and use LGPL v3.
+
+--enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
+Attention
+Make sure you have built and installed the latest MPP runtime and headers. Otherwise undefined behavior may occur, such as segmentation fault. Be careful if you use MPP deb packages from a vendor/BSP image, these packages are likely to be out of date.
+
+Examples
+Assumed that all the essential libs and toolchains are installed, such as git,meson,cmake,pkg-config,gcc,libdrm-dev,etc...
+
+# Native compilation on ARM/ARM64 host
+
+# Build MPP
+mkdir -p ~/dev && cd ~/dev
+git clone -b jellyfin-mpp --depth=1 https://gitee.com/nyanmisaka/mpp.git rkmpp
+pushd rkmpp
+mkdir rkmpp_build
+pushd rkmpp_build
+cmake \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON \
+    -DBUILD_TEST=OFF \
+    ..
+make -j $(nproc)
+make install
+
+
+# Build RGA
+mkdir -p ~/dev && cd ~/dev
+git clone -b jellyfin-rga --depth=1 https://gitee.com/nyanmisaka/rga.git rkrga
+meson setup rkrga rkrga_build \
+    --prefix=/usr \
+    --libdir=lib \
+    --buildtype=release \
+    --default-library=shared \
+    -Dcpp_args=-fpermissive \
+    -Dlibdrm=false \
+    -Dlibrga_demo=false
+meson configure rkrga_build
+ninja -C rkrga_build install
+
+
+# Build the minimal FFmpeg (You can customize the configure and install prefix)
+mkdir -p ~/dev && cd ~/dev
+git clone --depth=1 https://github.com/nyanmisaka/ffmpeg-rockchip.git ffmpeg
+cd ffmpeg
+./configure --prefix=/usr --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga
+make -j $(nproc)
+
+# Try the compiled FFmpeg without installation
+./ffmpeg -decoders | grep rkmpp
+./ffmpeg -encoders | grep rkmpp
+./ffmpeg -filters | grep rkrga
+
+# Install FFmpeg to the prefix path
+make install
+
+
+
+
+
+debug
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-debug=3 --disable-optimizations --disable-optimizations --disable-stripping  --extra-cflags="-g -O0"  --extra-ldflags="-g" --enable-muxer=fifo
+
+releae
+./configure --prefix=./out --enable-gpl --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --enable-muxer=fifo --disable-sdl2 
+
+
+./ffmpeg -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12" -vsync 2 -f null -
+
+
+
+
+./ffmpeg -re -loglevel warning -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i /mnt/data/v2c/videos/test2.mp4 -vf "hwupload,vpp_rkrga=transpose=cclock:format=nv12,hwdownload,format=nv12" -vsync 2 -f mxcam -phone 1 -
+
+
+./ffmpeg -loglevel info  -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "format=nv12" -vsync 2 -f mxcam -
+
+./ffmpeg -loglevel info  -i rtmp://47.100.44.74/myapp/ec2a15d1670261106046d1a11f9291cc -vf "format=nv12" -vsync 2 -f mxcam -audio_port 10200 -video_port 10201 -listen_ip 0.0.0.0 -
+
+
+
+
+netsh interface portproxy add v4tov4 listenport=40121 listenaddress=0.0.0.0 connectport=40121 connectaddress=192.168.132.92
+
+
+.\bin\ffmpeg -re -stream_loop -1 -i 云手机设置推流-01.mp4 -vf "scale=1072:-1" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f flv rtmp://47.100.44.74/myapp/ec2a15d
+
+
+
+./ffmpeg -loglevel warning -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i rtmp://47.100.44.74/myapp/806d94eabb02eb022516ea7bfe88f04b -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 10 -
+
+
+
+sudo ./ffmpeg_g -loglevel trace -re -stream_loop -1 -hwaccel rkmpp -hwaccel_output_format drm_prime -i "webrtc://rtc.nestbox.top/live/livestream123?signal_url=http://rtc.nestbox.top:1985/rtc/v1/whep/?app=live&stream=livestream123&signal_use_json=1" -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" -vsync 2 -f mxcam -phone 2 -
+
+./ffmpeg -loglevel warning -re -stream_loop -1 \
+         -hwaccel rkmpp -hwaccel_output_format drm_prime \
+         -f webrtc -webrtc_offer_path ./offer.sdp \
+         -webrtc_answer_path ./answer.sdp \
+         -timeout 30000 \
+         -i dummy \
+         -vf "hwupload,scale_rkrga=w=1072,vpp_rkrga=transpose=cclock:format=nv12" \
+         -af "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo" \
+         -vsync 2 -f mxcam -phone 2 -
+
+
+
+https://github.com/paullouisageneau/libdatachannel/blob/master/README.md
+在 libdatachannel 下新建独立的构建目录，例如 mkdir -p build-static && cd build-static，保持源码目录干净。
+使用 CMake 关闭共享库并启用位置无关代码：
+（可将生成器改成 Unix Makefiles，但 Ninja 构建更快；若需要特定依赖选项，可在此追加 -DUSE_GNUTLS=ON、-DUSE_EXTERNAL_USRSCTP=ON 等。）
+运行构建：cmake --build . -j$(nproc)，完成后在 build-static/lib/ 目录下会得到 libdatachannel.a 以及依赖的静态库（libjuice.a、libsrtp2.a 等）。
+若需要安装到系统目录，可使用 cmake --install . --prefix /usr/local；否则直接把生成的 .a 文件和对应头文件加入 FFmpeg 的静态链接路径即可。
